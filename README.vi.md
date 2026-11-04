@@ -29,7 +29,7 @@ Tất cả lặp qua các bộ `TEST_CASES` (tax_code / lookup_code) trong `.env
 ## Các lệnh chạy
 
 ```bash
-cp .env.example .env            # cài 1 lần: set TARGET_SITEURL/SITEKEY/TEST_CASES
+cp .env.example .env            # cài 1 lần: set TARGET_SITEURL/SITEKEY
 pip install -r requirements.txt
 ```
 
@@ -41,7 +41,17 @@ python run_test.py
 
 Giải Turnstile, gửi thẳng token tới `POST /api/search`, và lưu file XML
 hóa đơn thật vào `logs/xmls/` cho mỗi bộ test — đây là lệnh nên chạy mặc
-định.
+định. Bộ test lấy từ `test_cases.json` (đường dẫn mặc định — 1 mảng JSON
+các object `{"tax_code": "...", "lookup_code": "..."}`, field thừa như
+`invoice_no`/`document_id` bị bỏ qua); cặp nào đã có trong
+`logs/downloaded.json` sẽ bị skip. Dùng file khác (ví dụ batch 1000 bộ)
+bằng:
+
+```bash
+python run_test.py --cases /đường/dẫn/tới/file_của_bạn.json
+```
+
+(thay `/đường/dẫn/tới/file_của_bạn.json` bằng đường dẫn thật tới file của bạn)
 
 ### Tương tự nhưng chạy N bộ cùng lúc (để dò xem có bị rate-limit không)
 
@@ -69,6 +79,33 @@ python capture_request.py
 
 Đã chạy 1 lần để reverse-engineer endpoint/payload cho `run_test.py`;
 chỉ chạy lại nếu frontend của site thay đổi.
+
+## `run_test.py` hoạt động thế nào
+
+```mermaid
+flowchart TD
+    A[Với mỗi entry trong file --cases<br/>mặc định: test_cases.json] --> B{Cặp đã có trong<br/>logs/downloaded.json?}
+    B -->|có| S[skipped — kết quả cuối, không mở browser]
+    B -->|chưa| C[Mở Chrome qua backend uc,<br/>giải Turnstile → lấy token]
+    C -->|lỗi| E1[error]
+    C -->|có token| D[POST token + tax_code + lookup_code<br/>tới VERIFY_ENDPOINT]
+    D -->|lỗi| E1
+    D --> F{Response text khớp<br/>NOT_FOUND_KEYWORDS?}
+    F -->|có| N[not_found — kết quả cuối]
+    F -->|không| G{HTTP 2xx?}
+    G -->|không| R[rejected — kết quả cuối]
+    G -->|có| H{Response JSON có field<br/>'xml' khác rỗng?}
+    H -->|không| R
+    H -->|có| I[Lưu XML vào logs/xmls/,<br/>ghi cặp vào downloaded.json]
+    I --> ACC[accepted — kết quả cuối]
+    E1 --> J{Còn lượt thử<br/>trong MAX_ATTEMPTS?}
+    J -->|còn| C
+    J -->|hết| EF[error — kết quả cuối]
+```
+
+Các bộ test khác nhau chạy song song khi `MAX_WORKERS>1` (mỗi bộ 1 browser
+riêng, qua `ThreadPoolExecutor`); chỉ `error` mới retry — `skipped`,
+`not_found`, `rejected`, `accepted` luôn là kết quả cuối.
 
 ## `run_ui_test.py` hoạt động thế nào
 

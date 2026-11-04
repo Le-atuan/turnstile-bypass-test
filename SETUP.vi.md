@@ -76,10 +76,31 @@ Mở `.env` bằng một editor và kiểm tra/điền:
 - Để trống `VERIFY_ENDPOINT` nếu bạn chỉ muốn kiểm tra xem có lấy được
   token hay không, mà không chạm vào endpoint tra cứu.
 
-## 5. Chạy test
+`run_ui_test_uc.py` / `run_ui_test.py` vẫn đọc bộ test từ `TEST_CASES`
+trong `.env`; `run_test.py` (bước 5 dưới đây) thì không.
+
+## 5. Khai báo bộ test cho `run_test.py`
+
+`run_test.py` lấy các cặp tax_code/lookup_code từ 1 file JSON, không phải
+từ `.env`. Tạo file `test_cases.json` ở thư mục gốc project:
+
+```json
+[
+  {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"},
+  {"tax_code": "0400495597", "lookup_code": "mr3pye3m65"}
+]
+```
+
+Field thừa (`invoice_no`, `document_id`...) bị bỏ qua nếu có, nên bạn có
+thể paste thẳng data export lớn hơn vào. Cặp nào đã có trong
+`logs/downloaded.json` (từ lần chạy thành công trước) sẽ tự động bị bỏ
+qua, kể cả khi dùng `--cases` với file khác.
+
+## 6. Chạy test
 
 ```bash
-python run_test.py
+python run_test.py                                 # đọc test_cases.json (đường dẫn mặc định)
+python run_test.py --cases /đường/dẫn/tới/file_của_bạn.json  # hoặc file khác — thay bằng đường dẫn thật tới file của bạn
 ```
 
 Điều gì sẽ xảy ra:
@@ -96,7 +117,21 @@ python run_test.py
 5. Nó in ra một bản tóm tắt bằng ngôn ngữ dễ hiểu về ý nghĩa của kết
    quả — xem bảng trong `README.md` / README của nhánh `main`.
 
-## 6. Dọn dẹp
+### Chạy tuần tự hay song song
+
+Cả hai điều khiển qua `MAX_WORKERS` trong `.env`:
+
+```bash
+MAX_WORKERS=1    # tuần tự — mỗi lần 1 browser, lần lượt từng bộ hồ sơ
+MAX_WORKERS=4    # song song — tối đa 4 browser cùng lúc, mỗi bộ hồ sơ riêng
+python run_test.py
+```
+
+Dù chạy tuần tự hay song song, cặp nào đã có trong `logs/downloaded.json`
+đều bị skip giống nhau; nếu bị dừng giữa chừng, chạy lại sẽ tự tiếp tục
+từ chỗ dở dang.
+
+## 7. Dọn dẹp
 
 ```bash
 # Thoát khỏi venv khi đã xong việc

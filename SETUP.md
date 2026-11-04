@@ -73,10 +73,31 @@ Open `.env` in an editor and check/fill:
 - Leave `VERIFY_ENDPOINT` blank if you only want to test whether a token
   can be obtained at all, without touching the lookup endpoint.
 
-## 5. Run the test
+`run_ui_test_uc.py` / `run_ui_test.py` still read their test cases from
+`TEST_CASES` in `.env`; `run_test.py` (step 5 below) does not.
+
+## 5. List the test cases for `run_test.py`
+
+`run_test.py` loads its tax_code/lookup_code pairs from a JSON file, not
+`.env`. Create `test_cases.json` in the project root:
+
+```json
+[
+  {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"},
+  {"tax_code": "0400495597", "lookup_code": "mr3pye3m65"}
+]
+```
+
+Extra fields (`invoice_no`, `document_id`, ...) are ignored if present, so
+you can paste a larger export as-is. Pairs already recorded in
+`logs/downloaded.json` (from a past successful run) are skipped
+automatically, even across different `--cases` files.
+
+## 6. Run the test
 
 ```bash
-python run_test.py
+python run_test.py                                # reads test_cases.json (default path)
+python run_test.py --cases /path/to/your_file.json  # or a file of your own — replace with its real path
 ```
 
 What happens:
@@ -92,7 +113,21 @@ What happens:
 5. It prints a plain-language summary of what the result means — see the
    table in `README.md` / the `main` branch README.
 
-## 6. Clean up
+### Sequential vs. parallel runs
+
+Both are controlled by `MAX_WORKERS` in `.env`:
+
+```bash
+MAX_WORKERS=1    # sequential — one browser at a time, test cases run one after another
+MAX_WORKERS=4    # parallel — up to 4 browsers at once, each with its own test case
+python run_test.py
+```
+
+Either way, pairs already recorded in `logs/downloaded.json` are skipped
+the same way; if interrupted mid-run, re-running picks up where it left
+off.
+
+## 7. Clean up
 
 ```bash
 # Leave the venv when done

@@ -16,6 +16,7 @@ Usage:
 
 Requires Python 3.8+, real Chrome (Xvfb on headless Linux), the EzSolver/ checkout.
 """
+import argparse
 import json
 import logging
 import os
@@ -42,7 +43,24 @@ VERIFY_ENDPOINT = os.environ.get("VERIFY_ENDPOINT", "").strip()
 VERIFY_METHOD = os.environ.get("VERIFY_METHOD", "POST").strip().upper()
 VERIFY_TOKEN_FIELD = os.environ.get("VERIFY_TOKEN_FIELD", "cf-turnstile-response").strip()
 VERIFY_EXTRA_FIELDS = json.loads(os.environ.get("VERIFY_EXTRA_FIELDS", "{}") or "{}")
-TEST_CASES = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
+
+# Test cases come from a JSON file, not .env — default path below, or pass
+# --cases <path> to use a different file. Format: a JSON list of
+# {"tax_code": "...", "lookup_code": "..."} objects; extra fields
+# (invoice_no, document_id, ...) are ignored if present.
+DEFAULT_TEST_CASES_FILE = "test_cases.json"
+
+_cli = argparse.ArgumentParser()
+_cli.add_argument("--cases", default=DEFAULT_TEST_CASES_FILE,
+                   help=f"Path to the JSON file of test cases (default: {DEFAULT_TEST_CASES_FILE})")
+TEST_CASES_FILE = _cli.parse_args().cases
+
+if os.path.isfile(TEST_CASES_FILE):
+    with open(TEST_CASES_FILE, "r", encoding="utf-8") as f:
+        TEST_CASES = json.load(f)
+else:
+    TEST_CASES = []
+
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries on technical failure only
 SOLVER_BACKEND = os.environ.get("SOLVER_BACKEND", "uc").strip()  # nodriver | uc
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "1"))  # >1 runs test cases concurrently, each its own browser
@@ -120,7 +138,7 @@ def log_environment():
     logger.debug("VERIFY_METHOD=%s", VERIFY_METHOD)
     logger.debug("MAX_ATTEMPTS=%s", MAX_ATTEMPTS)
     logger.debug("NOT_FOUND_KEYWORDS=%s", NOT_FOUND_KEYWORDS)
-    logger.debug("TEST_CASES count=%s", len(TEST_CASES))
+    logger.debug("TEST_CASES count=%s (source: %s)", len(TEST_CASES), TEST_CASES_FILE)
     logger.debug("===================")
 
 
@@ -290,8 +308,9 @@ def main():
         sys.exit(1)
     if not TEST_CASES:
         logger.error(
-            "Set TEST_CASES in .env first (see .env.example) — a JSON list of "
-            '{"tax_code": "...", "lookup_code": "..."} objects, one per run.'
+            "No test cases loaded from %s — create it (or pass --cases <path>) "
+            'as a JSON list of {"tax_code": "...", "lookup_code": "..."} objects, one per run.',
+            TEST_CASES_FILE,
         )
         sys.exit(1)
 

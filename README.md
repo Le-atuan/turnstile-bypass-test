@@ -29,7 +29,7 @@ All loop over the `TEST_CASES` pairs (tax_code / lookup_code) in `.env`.
 ## Commands
 
 ```bash
-cp .env.example .env            # one-time setup: set TARGET_SITEURL/SITEKEY/TEST_CASES
+cp .env.example .env            # one-time setup: set TARGET_SITEURL/SITEKEY
 pip install -r requirements.txt
 ```
 
@@ -41,7 +41,17 @@ python run_test.py
 
 Solves Turnstile, replays the token straight to `POST /api/search`, and
 saves the real invoice XML to `logs/xmls/` for every test case — this is
-the one to run by default.
+the one to run by default. Test cases come from `test_cases.json` (default
+path — a JSON list of `{"tax_code": "...", "lookup_code": "..."}` objects,
+extra fields like `invoice_no`/`document_id` are ignored); pairs already in
+`logs/downloaded.json` are skipped. Use a different file (e.g. a batch of
+1000) with:
+
+```bash
+python run_test.py --cases /path/to/your_file.json
+```
+
+(replace `/path/to/your_file.json` with the real path to your own file)
 
 ### Same, but N test cases at once (to probe for missing rate-limiting)
 
@@ -69,6 +79,33 @@ python capture_request.py
 
 Already run once to reverse-engineer `run_test.py`'s endpoint/payload;
 re-run only if the site's frontend changes.
+
+## How `run_test.py` works
+
+```mermaid
+flowchart TD
+    A[For each entry in --cases file<br/>default: test_cases.json] --> B{Pair already in<br/>logs/downloaded.json?}
+    B -->|yes| S[skipped — final, no browser opened]
+    B -->|no| C[Open Chrome via uc backend,<br/>solve Turnstile → get token]
+    C -->|exception| E1[error]
+    C -->|token| D[POST token + tax_code + lookup_code<br/>to VERIFY_ENDPOINT]
+    D -->|exception| E1
+    D --> F{Response text matches<br/>NOT_FOUND_KEYWORDS?}
+    F -->|yes| N[not_found — final]
+    F -->|no| G{HTTP 2xx?}
+    G -->|no| R[rejected — final]
+    G -->|yes| H{response JSON has<br/>non-empty 'xml' field?}
+    H -->|no| R
+    H -->|yes| I[Save XML to logs/xmls/,<br/>record pair in downloaded.json]
+    I --> ACC[accepted — final]
+    E1 --> J{Attempts left<br/>under MAX_ATTEMPTS?}
+    J -->|yes| C
+    J -->|no| EF[error — final]
+```
+
+Jobs for different test cases run concurrently when `MAX_WORKERS>1` (each
+its own browser, via `ThreadPoolExecutor`); only `error` retries — `skipped`,
+`not_found`, `rejected` and `accepted` are always final.
 
 ## How `run_ui_test.py` works
 
