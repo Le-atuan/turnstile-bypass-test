@@ -191,8 +191,12 @@ sử dụng các hàm khởi chạy trình duyệt của EzSolver (`start_browse
    `input[placeholder="MST bên bán"]` / `input[placeholder="Mã tra cứu hóa đơn"]`,
    gõ từng ký tự một với độ trễ ngẫu nhiên (`random.uniform(0.05, 0.18)`
    giây) để tránh kiểu gõ tức thời/máy móc.
-4. Click nút thật được tìm theo text hiển thị, `"Tra cứu"`.
-5. Lấy và in ra nội dung text của trang sau khi submit.
+4. Click đúng nút `"Tra cứu"` thật thông qua view-id ổn định của Webix
+   (`search:btnsearch`) và một cú click chuột thật dựa trên tọa độ —
+   xem mục "Framework giao diện: Webix" ở dưới để biết lý do.
+5. Polling banner kết quả (Webix view `search:status`) cho tới khi hiện
+   ra (đã xác nhận có thể mất tới 5-8s, không chỉ ~3s), rồi đọc và in ra
+   text của nó.
 
 Cấu hình qua `.env`: `TEST_CASES`, một list JSON gồm các object
 `{"tax_code": "...", "lookup_code": "..."}` — mỗi object là một hóa đơn
@@ -204,12 +208,59 @@ không test được rate-limit trên các request giống hệt nhau, nhưng n�
 test được xem site có xử lý nhất quán qua nhiều lượt tra cứu khác nhau
 do bot thực hiện trong cùng một session hay không.
 
-**Chưa được chạy thử end-to-end trong session này** — được viết dựa
-theo API đã công bố của nodriver, nhưng môi trường cloud sandbox này
-không có Chrome thật và không có đường mạng tới mục tiêu, nên các tên
-hàm cụ thể (`page.select`, `page.find`, `element.send_keys`) cần được
-xác nhận lại với phiên bản nodriver bạn đã cài, ở lần chạy đầu tiên trên
-máy bạn.
+**Đã được kiểm chứng một phần qua recon thật** (2 lượt tra cứu thật đã
+được thực hiện thủ công trên trang thật — xem mục "Framework giao diện:
+Webix" ở dưới), nhưng bản thân script này chưa được chạy end-to-end
+trong session này — môi trường cloud sandbox này không có Chrome thật
+và không có đường mạng tới mục tiêu. Các tên hàm cụ thể của nodriver
+(`page.select`, `element.send_keys`, `page.mouse_move`/`mouse_click`)
+cần được xác nhận lại với phiên bản nodriver bạn đã cài, ở lần chạy đầu
+tiên trên máy bạn.
+
+### Framework giao diện: Webix — vì sao click nút dùng tọa độ, không dùng selector
+
+Recon xác nhận trang được dựng bằng **Webix**, không phải React/Vue.
+Điều này quan trọng với automation:
+
+- Chỉ 2 ô nhập liệu (`search:mst` cho MST, `search:sec` cho mã tra cứu)
+  là `<input type="text">` thật — selector `input[placeholder="..."]`
+  của chúng ta nhắm thẳng vào đó, vẫn dùng được như cũ.
+- Các nút, kể cả `"Tra cứu"` (view-id Webix là `search:btnsearch`),
+  được render thành `<div>`, không phải thẻ `<button>` thường, và id
+  DOM số của chính trang bị random mỗi lần tải lại — không dùng được
+  làm selector ổn định.
+- Webix gán cho mỗi view một **view-id nội bộ ổn định**, sống sót qua
+  các lần tải lại, truy vấn được ngay trong trang qua
+  `webix.$$('<view-id>')`. Đây chính là cách `click_submit_button()`
+  dùng để tìm vị trí thật trên màn hình của nút trước khi click bằng
+  một cú di chuột + click giả lập thật — cùng kỹ thuật mà chính EzSolver
+  dùng cho iframe Turnstile.
+- **Vì sao không dùng thẳng `.click()`**: recon đã trực tiếp click nút
+  `"Tải XML"` cạnh bên (`search:btnxml`) và phát hiện nút đó **không hề
+  có event handler nào được gắn** — không phát sinh request, không tải
+  file, không có console log nào. Việc này có nghĩa app dựa vào pointer
+  event thật thay vì synthetic click nói chung, hay chỉ riêng nút đó
+  chưa hoàn thiện/bị lỗi phía site, thì **chưa xác định** được — nhưng
+  đó là lý do chính đáng để ưu tiên click bằng tọa độ thật thay vì
+  `element.click()` để đảm bảo độ tin cậy. (Lưu ý riêng: đây có vẻ là
+  một bug thật trên tính năng "Tải XML" của site, đáng báo lại cho team
+  dev, không liên quan tới việc test Turnstile.)
+- Các element kết quả (`search:status` — banner trạng thái có màu, ví
+  dụ màu xanh "Hóa đơn có hiệu lực" khi hóa đơn hợp lệ — `search:btnxml`,
+  và `search:ipdf`, một PDF viewer nhúng hiển thị đúng nội dung hóa đơn)
+  đều ẩn khi trang mới tải và chỉ được Webix hiện ra sau khi tra cứu
+  xong. `wait_for_result()` polling
+  `webix.$$('search:status').isVisible()` thay vì đoán một khoảng chờ
+  cố định, vì recon quan sát thấy một lượt tra cứu thật có thể mất tới
+  5-8s mới xong.
+- Một trong 2 lượt tra cứu thật của recon hoàn tất sau ~5s, với
+  `search:status` hiện "Hóa đơn có hiệu lực" và hóa đơn render ra trong
+  PDF viewer nhúng; trường hợp còn lại không cho ra kết quả hiển thị
+  trong khoảng thời gian quan sát, và recon không xác định được đó là
+  "không khớp dữ liệu" hay "cú click không được ghi nhận." Script này
+  coi trường hợp mơ hồ "không có kết quả trong thời gian chờ" là lỗi kỹ
+  thuật (`error`, có retry) thay vì đoán bừa là `not_found` hợp lệ — xem
+  mục Thử lại ở dưới.
 
 ### Thử lại — chỉ khi lỗi kỹ thuật, không bao giờ cho "không tìm thấy"
 

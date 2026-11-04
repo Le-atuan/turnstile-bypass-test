@@ -29,18 +29,29 @@ that function. It only reuses EzSolver's browser-launch helpers
      a screenshot of the real page), with randomized per-character delay
      to avoid an instant/robotic fill pattern. Repeats once per entry in
      TEST_CASES — a different real invoice each run.
-  4. Clicks the real "Tra cứu" button.
-  5. Captures and prints what the page shows afterward, so you can see
+  4. Clicks the real "Tra cứu" button — via Webix's stable view-id
+     (search:btnsearch) and a real coordinate-based mouse click, not a
+     plain CSS selector or a synthetic .click(). Recon confirmed the UI
+     is built with Webix (buttons are <div>s, not <button>s, with
+     internal DOM ids that change every page load) and that a sibling
+     button (search:btnxml, "Tải XML") has NO bound click handler at all
+     — so a real mouse click at the button's actual coordinates is the
+     technique proven to work, matching how recon's own manual test
+     succeeded.
+  5. Polls the result banner (Webix view search:status) until it becomes
+     visible — recon observed this can take 5-8s, not the ~3s this
+     script originally assumed — then reads its text (falling back to
+     the page body if that lookup fails for any reason) so you can see
      whether the lookup succeeded, failed, or the page reacted as if it
-     detected automation (CAPTCHA re-challenge, block page, error state).
+     detected automation.
 
-NOT YET EXECUTED IN THIS SESSION: this cloud sandbox has no real Chrome
-and no network path to the target, so this script has not been run
-end-to-end. nodriver's exact method names (`page.select`, `page.find`,
-`element.send_keys`) are written per its documented API but should be
-verified against the installed nodriver version on your machine — if a
-call fails, check `nodriver`'s current API (e.g. `python -c "import
-nodriver; help(nodriver.Tab)"`) and adjust.
+PARTIALLY VALIDATED AGAINST REAL RECON (2 live lookups performed
+manually, one succeeded end-to-end), but this script itself has NOT been
+executed end-to-end in this session: this cloud sandbox has no real
+Chrome and no network path to the target. nodriver's exact method names
+(`page.select`, `element.send_keys`, `page.mouse_move`/`mouse_click`) are
+written per its documented API but should be verified against the
+installed nodriver version on your machine.
 
 LOGGING: every run writes a timestamped log file under logs/ (full
 detail, including tracebacks) in addition to concise console output. On
@@ -75,6 +86,10 @@ from solver import _find_chrome, _get_profile_dir, _start_xvfb_if_needed, start_
 SITEURL = os.environ.get("TARGET_SITEURL", "https://tracuu.einvoice365.com/").strip()
 TEST_CASES = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
 TOKEN_WAIT_TIMEOUT = int(os.environ.get("TOKEN_WAIT_TIMEOUT", "20"))
+# Recon observed the result banner (Webix view "search:status") can take
+# 5-8s to appear after clicking "Tra cứu" — not instant. Poll instead of a
+# fixed sleep, up to this many seconds.
+RESULT_WAIT_TIMEOUT = int(os.environ.get("RESULT_WAIT_TIMEOUT", "20"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries per test case, TECHNICAL failures only
 
 # Phrases that mean "the site answered normally — it just has no record for
@@ -146,6 +161,7 @@ def log_environment():
         logger.debug("Could not resolve Chrome path: %s", exc)
     logger.debug("TARGET_SITEURL=%s", SITEURL)
     logger.debug("TOKEN_WAIT_TIMEOUT=%s", TOKEN_WAIT_TIMEOUT)
+    logger.debug("RESULT_WAIT_TIMEOUT=%s", RESULT_WAIT_TIMEOUT)
     logger.debug("MAX_ATTEMPTS=%s", MAX_ATTEMPTS)
     logger.debug("NOT_FOUND_KEYWORDS=%s", NOT_FOUND_KEYWORDS)
     logger.debug("TEST_CASES count=%s", len(TEST_CASES))
@@ -195,6 +211,100 @@ async def wait_for_token(page, timeout: int) -> bool:
         await asyncio.sleep(0.5)
     logger.debug("No token after %d poll(s) / %ds timeout", poll_count, timeout)
     return False
+
+
+async def click_submit_button(page):
+    """Click the real 'Tra cứu' button via Webix's stable view-id
+    (search:btnsearch) and a REAL coordinate-based mouse click, not a
+    synthetic .click() call.
+
+    Why not page.find("Tra cứu").click() or a plain CSS selector: recon
+    confirmed the UI is built with Webix — "Tra cứu" is rendered as
+    <div class="webix_view webix_control webix_el_button ...">, not a
+    plain <button>, and Webix assigns each view a STABLE internal view-id
+    (survives page reloads) queryable via `webix.$$('<view-id>')`, unlike
+    the DOM's own numeric ids which are randomized per load. Recon also
+    found the sibling "Tải XML" button (search:btnxml) has NO bound click
+    handler at all when inspected directly — so this app's Webix buttons
+    are not guaranteed to respond to a programmatic .click(). A real
+    mouse-move-then-click at the button's actual screen coordinates (the
+    same technique EzSolver itself uses for the Turnstile iframe) is the
+    one proven to work, since recon's own manual test succeeded this way.
+    """
+    rect = await page.evaluate("""
+        (() => {
+            if (typeof webix === 'undefined') return null;
+            const v = webix.$$('search:btnsearch');
+            if (!v || !v.$view) return null;
+            const el = v.$view.querySelector('button') || v.$view;
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return null;
+            return {x: r.x, y: r.y, w: r.width, h: r.height};
+        })()
+    """)
+    if not rect:
+        raise RuntimeError(
+            "Could not locate search:btnsearch via webix.$$() — the Webix "
+            "API may not be loaded yet, the view-id may have changed, or "
+            "the button isn't rendered/visible. Check the saved HTML."
+        )
+
+    cx = rect["x"] + rect["w"] / 2 + random.uniform(-3, 3)
+    cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
+    await page.mouse_move(cx - 40, cy - 10)
+    await asyncio.sleep(random.uniform(0.15, 0.3))
+    await page.mouse_move(cx, cy)
+    await asyncio.sleep(random.uniform(0.08, 0.2))
+    await page.mouse_click(cx, cy)
+
+
+async def wait_for_result(page, timeout: int) -> bool:
+    """Poll Webix's result-status view (search:status) until it becomes
+    visible. Recon confirmed this banner (not just any DOM change) is
+    what actually signals a completed lookup — e.g. "Hóa đơn có hiệu lực"
+    for a valid invoice — and that it can take 5-8s to appear, not just
+    the ~3s this script originally assumed.
+    """
+    deadline = time.time() + timeout
+    poll_count = 0
+    while time.time() < deadline:
+        poll_count += 1
+        visible = await page.evaluate("""
+            (() => {
+                if (typeof webix === 'undefined') return false;
+                const v = webix.$$('search:status');
+                return !!(v && v.isVisible && v.isVisible());
+            })()
+        """)
+        if visible:
+            logger.debug("search:status became visible after %d poll(s)", poll_count)
+            return True
+        await asyncio.sleep(0.5)
+    logger.debug("search:status never became visible after %d poll(s) / %ds", poll_count, timeout)
+    return False
+
+
+async def read_result_text(page) -> str:
+    """Read the result banner's own text if available (precise — this is
+    exactly the "Hóa đơn có hiệu lực" / error message Webix renders),
+    falling back to a slice of the whole page body if the banner lookup
+    itself fails for any reason.
+    """
+    try:
+        status_text = await page.evaluate("""
+            (() => {
+                if (typeof webix === 'undefined') return '';
+                const v = webix.$$('search:status');
+                return (v && v.$view) ? v.$view.innerText : '';
+            })()
+        """)
+    except Exception:
+        status_text = ""
+
+    if status_text:
+        return status_text
+
+    return await page.evaluate("document.body.innerText.slice(0, 600)")
 
 
 async def dump_failure_artifacts(page, run_label: str, step: str):
@@ -309,8 +419,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             return OUTCOME_ERROR
 
         try:
-            submit_btn = await page.find("Tra cứu", best_match=True)
-            await submit_btn.click()
+            await click_submit_button(page)
         except Exception:
             logger.error(
                 "Run %s: FAILED to find/click the 'Tra cứu' button.", run_label
@@ -319,18 +428,36 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             await dump_failure_artifacts(page, run_label, "click_submit_error")
             return OUTCOME_ERROR
 
-        logger.info("Submitted. Waiting for the page to respond...")
-        await asyncio.sleep(3)
+        logger.info("Submitted. Waiting for the result banner (search:status) to appear "
+                    "(up to %ds — recon observed this can take 5-8s)...", RESULT_WAIT_TIMEOUT)
+        try:
+            got_result = await wait_for_result(page, timeout=RESULT_WAIT_TIMEOUT)
+        except Exception:
+            logger.error("Run %s: FAILED while polling for the result banner.", run_label)
+            logger.debug("Traceback:\n%s", traceback.format_exc())
+            await dump_failure_artifacts(page, run_label, "result_poll_error")
+            return OUTCOME_ERROR
+
+        if not got_result:
+            logger.warning(
+                "Run %s RESULT: no result banner appeared within %ds after "
+                "clicking 'Tra cứu'. Recon could not determine whether this means "
+                "'no match for this data' or 'the click didn't register' — treated "
+                "as a technical error so it gets retried with a fresh browser.",
+                run_label, RESULT_WAIT_TIMEOUT,
+            )
+            await dump_failure_artifacts(page, run_label, "no_result")
+            return OUTCOME_ERROR
 
         try:
-            body_text = await page.evaluate("document.body.innerText.slice(0, 600)")
+            body_text = await read_result_text(page)
         except Exception:
             logger.error("Run %s: FAILED to read the page's response content.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "read_result_error")
             return OUTCOME_ERROR
 
-        logger.info("Page content after submit (first 600 chars):")
+        logger.info("Result content (first 600 chars):")
         logger.info(body_text)
 
         elapsed = round(time.time() - t0, 2)

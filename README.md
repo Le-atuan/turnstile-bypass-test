@@ -173,8 +173,12 @@ page's DOM is never wiped:
    `input[placeholder="MST bên bán"]` / `input[placeholder="Mã tra cứu hóa đơn"]`
    fields, one character at a time with a randomized delay
    (`random.uniform(0.05, 0.18)`s) to avoid an instantaneous/robotic fill.
-4. Click the real button found by its visible text, `"Tra cứu"`.
-5. Capture and print the page's body text after submission.
+4. Click the real `"Tra cứu"` button via Webix's stable view-id
+   (`search:btnsearch`) and a real coordinate-based mouse click — see
+   "UI framework: Webix" below for why.
+5. Poll the result banner (Webix view `search:status`) until it becomes
+   visible (confirmed to take up to 5-8s, not just ~3s), then read and
+   print its text.
 
 Configured via `.env`: `TEST_CASES`, a JSON list of
 `{"tax_code": "...", "lookup_code": "..."}` objects — each a real,
@@ -185,12 +189,60 @@ the same lookup, so it doesn't by itself test rate-limiting on identical
 requests, but it does test whether the site behaves consistently across
 multiple distinct bot-driven lookups in one session.
 
-**Not yet executed end-to-end in this session** — written against
-nodriver's documented API, but this sandboxed cloud environment has no
-real Chrome and no network path to the target, so the exact method names
-(`page.select`, `page.find`, `element.send_keys`) should be verified
-against your installed nodriver version the first time you run it
-locally.
+**Partially validated against real recon** (two live lookups were
+performed manually against the real page — see "UI framework: Webix"
+below), but this script itself has not been executed end-to-end in this
+session — this sandboxed cloud environment has no real Chrome and no
+network path to the target. The exact nodriver method names
+(`page.select`, `element.send_keys`, `page.mouse_move`/`mouse_click`)
+should be verified against your installed nodriver version the first
+time you run it locally.
+
+### UI framework: Webix — why button clicks use coordinates, not selectors
+
+Recon confirmed the page is built with **Webix**, not React/Vue. This
+matters for automation:
+
+- Only the two text inputs (`search:mst` for MST, `search:sec` for the
+  lookup code) are real `<input type="text">` elements — our
+  `input[placeholder="..."]` selectors target those directly and are
+  fine as-is.
+- Buttons, including `"Tra cứu"` (Webix view-id `search:btnsearch`), are
+  rendered as a `<div>`, not a plain `<button>` tag, and the page's own
+  numeric DOM ids are randomized on every reload — not usable as stable
+  selectors.
+- Webix assigns each view a **stable internal view-id** that survives
+  reloads, queryable in-page via `webix.$$('<view-id>')`. This is what
+  `click_submit_button()` uses to locate the real button's current
+  on-screen position before clicking it with a real simulated mouse
+  move + click — the same technique EzSolver itself uses for the
+  Turnstile iframe.
+- **Why not a plain `.click()` call**: recon directly clicked the
+  sibling `"Tải XML"` button (`search:btnxml`) and found it has **no
+  click handler bound at all** — no network request, no download, no
+  console output resulted. Whether this means the app relies on native
+  pointer events rather than synthetic clicks in general, or that this
+  one specific button is simply unfinished/broken on the site's end, is
+  unconfirmed either way — but it's a strong reason to prefer a real
+  coordinate-based click over `element.click()` for reliability.
+  (Separately: this looks like a possible bug on the site's "Tải XML"
+  feature itself, worth flagging to the dev team independently of
+  Turnstile testing.)
+- The result elements (`search:status` — the colored outcome banner,
+  e.g. green "Hóa đơn có hiệu lực" for a valid invoice — `search:btnxml`,
+  and `search:ipdf`, an embedded PDF viewer showing the actual invoice)
+  are all hidden at page load and only shown by Webix after a completed
+  lookup. `wait_for_result()` polls `webix.$$('search:status').isVisible()`
+  rather than guessing a fixed delay, since recon observed a real lookup
+  take up to 5-8s to resolve.
+- One of recon's two real lookups resolved in ~5s with `search:status`
+  showing "Hóa đơn có hiệu lực" and the invoice rendering in the
+  embedded PDF viewer; the other case didn't produce a visible result
+  within the observed window, and recon could not determine whether that
+  meant "no match" or "the click didn't register." This script treats
+  that ambiguous "no result within timeout" case as a technical error
+  (`error`, retryable) rather than guessing it's a valid `not_found` —
+  see Retries below.
 
 ### Retries — technical errors only, never for "not found"
 
