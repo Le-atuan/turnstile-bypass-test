@@ -309,32 +309,36 @@ async def read_result_text(page) -> str:
     return await page.evaluate("document.body.innerText.slice(0, 600)")
 
 
-async def dump_failure_artifacts(page, run_label: str, step: str):
-    """Best-effort screenshot + page HTML on failure. Never crashes the run."""
-    safe_label = run_label.replace("/", "-")
-    base = os.path.join(LOG_DIR, f"failure_{RUN_STAMP}_run{safe_label}_{step}")
+# Track which (test case, error step) we've already captured, so a step
+# that fails on every retry produces just one screenshot per test case.
+_saved_artifacts = set()
 
+
+async def dump_failure_artifacts(page, run_label: str, step: str):
+    """Best-effort ONE screenshot per (test case, error step). Repeated
+    failures of the same step for the same case are skipped; a different
+    step (a different error) gets its own screenshot. Never crashes the run.
+    """
+    # Drop the "(attempt x/y)" part so all retries of a case share a key.
+    case_label = run_label.split(" (attempt")[0].strip().replace("/", "of")
+    key = (case_label, step)
+    if key in _saved_artifacts:
+        logger.debug("Screenshot for (%s, %s) already saved — skipping.", case_label, step)
+        return
+    _saved_artifacts.add(key)
+
+    path = os.path.join(LOG_DIR, f"failure_{RUN_STAMP}_{case_label}_{step}.png")
     try:
-        screenshot_path = base + ".png"
         # Method name varies across nodriver versions.
         if hasattr(page, "save_screenshot"):
-            await page.save_screenshot(screenshot_path)
+            await page.save_screenshot(path)
         elif hasattr(page, "screenshot"):
-            await page.screenshot(screenshot_path)
+            await page.screenshot(path)
         else:
             raise AttributeError("page has neither save_screenshot() nor screenshot()")
-        logger.info("Saved failure screenshot: %s", screenshot_path)
+        logger.info("Saved failure screenshot: %s", path)
     except Exception as exc:
         logger.warning("Could not save screenshot (non-fatal): %s", exc)
-
-    try:
-        html_path = base + ".html"
-        html = await page.evaluate("document.documentElement.outerHTML")
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html or "")
-        logger.info("Saved failure page HTML: %s", html_path)
-    except Exception as exc:
-        logger.warning("Could not save page HTML (non-fatal): %s", exc)
 
 
 async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
@@ -533,7 +537,7 @@ async def main():
                 succeeded, not_found, errored, len(results))
     if errored:
         logger.info("See the full log for tracebacks: %s", LOG_FILE)
-        logger.info("Saved screenshots/HTML (if any): %s", LOG_DIR)
+        logger.info("Saved failure screenshots (if any): %s", LOG_DIR)
     logger.info("=" * 70)
 
 
