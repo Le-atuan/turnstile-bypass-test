@@ -2,3 +2,7 @@
 venv/
 __pycache__/
 *.pyc
+
+# run_ui_test.py writes full debug logs + failure screenshots/HTML here.
+# These can contain real invoice/lookup data from TEST_CASES — never commit.
+logs/

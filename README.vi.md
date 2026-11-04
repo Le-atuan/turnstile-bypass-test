@@ -186,3 +186,39 @@ không có Chrome thật và không có đường mạng tới mục tiêu, nên
 hàm cụ thể (`page.select`, `page.find`, `element.send_keys`) cần được
 xác nhận lại với phiên bản nodriver bạn đã cài, ở lần chạy đầu tiên trên
 máy bạn.
+
+### Thử lại (retry)
+
+Mỗi phần tử trong `TEST_CASES` được thử lại tối đa `MAX_ATTEMPTS` lần
+(mặc định 3) nếu bất kỳ bước nào thất bại — khởi chạy browser, điều
+hướng, chờ token, điền form, bấm submit, hoặc đọc kết quả. Mỗi lần thử
+mở một browser hoàn toàn mới (browser của lần thử trước luôn được đóng
+trước), nên lần thử lại không bao giờ dùng lại một session có thể đã bị
+hỏng. Có một khoảng chờ ngẫu nhiên (tăng dần theo mỗi lần thử) giữa các
+lần thử để không dồn dập request vào site. Nếu tất cả các lần thử của
+một bộ dữ liệu đều thất bại, script ghi log lại và chuyển sang phần tử
+tiếp theo trong `TEST_CASES` thay vì dừng toàn bộ.
+
+### Logging & xử lý sự cố
+
+Mỗi lần chạy ghi ra một file có timestamp tại
+`logs/ui_test_<timestamp>.log` (chi tiết đầy đủ: từng bước, từng lần
+thử, và full traceback Python cho bất kỳ lỗi nào) bên cạnh output ngắn
+gọn trên console. **`logs/` đã được đưa vào `.gitignore`** — vì nó có
+thể chứa mã số thuế/mã tra cứu thật và nội dung trang, nên tuyệt đối
+không được commit.
+
+Khi một bước thất bại, script cũng cố gắng lưu lại (best-effort):
+- `logs/failure_<timestamp>_run<N>_<step>.png` — ảnh chụp màn hình
+- `logs/failure_<timestamp>_run<N>_<step>.html` — toàn bộ HTML của
+  trang tại thời điểm lỗi
+
+cả hai đều được đặt tên theo lần chạy và bước nào bị lỗi, để bạn thấy
+chính xác trình duyệt đang nhìn thấy gì. Việc lưu các file này tự nó
+cũng được bọc trong try/except riêng — nếu phiên bản nodriver của bạn
+không có hàm screenshot mà script đang đoán tên
+(`save_screenshot`/`screenshot`), lỗi đó chỉ được ghi thành cảnh báo chứ
+không bao giờ che mất hay thay thế lỗi gốc.
+
+Nếu gặp lỗi, hãy xem file log trước — nó ghi rõ đúng bước nào lỗi và có
+kèm traceback — trước khi báo lại cho tôi.

@@ -166,3 +166,37 @@ real Chrome and no network path to the target, so the exact method names
 (`page.select`, `page.find`, `element.send_keys`) should be verified
 against your installed nodriver version the first time you run it
 locally.
+
+### Retries
+
+Each `TEST_CASES` entry is retried up to `MAX_ATTEMPTS` times (default
+3) if any step fails — browser launch, navigation, the token wait, a
+form fill, the submit click, or reading the result. Each attempt opens a
+completely fresh browser (a prior attempt's browser is always closed
+first), so a retry never reuses a possibly-broken session. A randomized
+backoff (longer on each successive attempt) separates attempts so
+retries don't hammer the site back-to-back. If all attempts for a case
+fail, the script logs that and moves on to the next `TEST_CASES` entry
+rather than aborting the whole run.
+
+### Logging & troubleshooting
+
+Every run writes a timestamped file to `logs/ui_test_<timestamp>.log`
+(full detail: every step, every attempt, and a full Python traceback for
+any failure) in addition to the concise console output. **`logs/` is
+gitignored** — it can contain real tax/lookup codes and page content, so
+it must never be committed.
+
+On a step failure, the script also makes a best-effort attempt to save:
+- `logs/failure_<timestamp>_run<N>_<step>.png` — a screenshot
+- `logs/failure_<timestamp>_run<N>_<step>.html` — the page's full HTML
+  at the moment of failure
+
+both named after which run and which step failed, so you can see exactly
+what the browser saw. Saving these is itself wrapped in its own
+try/except — if your nodriver version doesn't expose the screenshot
+method this script guesses (`save_screenshot`/`screenshot`), that failure
+is logged as a warning but never hides or replaces the original error.
+
+If you hit an error, check the log file first — it names the exact step
+and includes the traceback — before reporting it.
