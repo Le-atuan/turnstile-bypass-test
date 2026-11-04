@@ -91,23 +91,23 @@ chỉ chạy lại nếu frontend của site thay đổi.
 
 ```mermaid
 flowchart TD
-    A[Với mỗi entry {info: {tax_code, lookup_code}}<br/>từ file --cases hoặc TEST_CASES trong .env] --> B{Cặp đã có trong<br/>logs/downloaded.json?}
-    B -->|có| S[skipped — kết quả cuối, không mở browser]
-    B -->|chưa| C[Mở Chrome qua backend uc,<br/>giải Turnstile → lấy token]
-    C -->|lỗi| E1[error]
-    C -->|có token| D[POST token + tax_code + lookup_code<br/>tới VERIFY_ENDPOINT]
+    A["Với mỗi entry info.tax_code / info.lookup_code<br/>từ file --cases hoặc TEST_CASES trong .env"] --> B{"Cặp đã có trong<br/>logs/downloaded.json?"}
+    B -->|có| S["skipped — kết quả cuối, không mở browser"]
+    B -->|chưa| C["Mở Chrome qua backend uc,<br/>giải Turnstile, lấy token"]
+    C -->|lỗi| E1["error"]
+    C -->|có token| D["POST token + tax_code + lookup_code<br/>tới VERIFY_ENDPOINT"]
     D -->|lỗi| E1
-    D --> F{Response text khớp<br/>NOT_FOUND_KEYWORDS?}
-    F -->|có| N[not_found — kết quả cuối]
-    F -->|không| G{HTTP 2xx?}
-    G -->|không| R[rejected — kết quả cuối]
-    G -->|có| H{Response JSON có field<br/>'xml' khác rỗng?}
+    D --> F{"Response text khớp<br/>NOT_FOUND_KEYWORDS?"}
+    F -->|có| N["not_found — kết quả cuối"]
+    F -->|không| G{"HTTP 2xx?"}
+    G -->|không| R["rejected — kết quả cuối"]
+    G -->|có| H{"Response JSON có field<br/>xml khác rỗng?"}
     H -->|không| R
-    H -->|có| I[Lưu XML vào logs/xmls/,<br/>ghi cặp vào downloaded.json]
-    I --> ACC[accepted — kết quả cuối]
-    E1 --> J{Còn lượt thử<br/>trong MAX_ATTEMPTS?}
+    H -->|có| I["Lưu XML vào logs/xmls/,<br/>ghi cặp vào downloaded.json"]
+    I --> ACC["accepted — kết quả cuối"]
+    E1 --> J{"Còn lượt thử<br/>trong MAX_ATTEMPTS?"}
     J -->|còn| C
-    J -->|hết| EF[error — kết quả cuối]
+    J -->|hết| EF["error — kết quả cuối"]
 ```
 
 Để lấy một hóa đơn, dùng `get_tracuu_einvoice365.py` — cùng luồng
@@ -165,6 +165,30 @@ if result["file_xml"]:
 else:
     ...  # không có file: backend từ chối, response không có 'xml', hoặc hết lượt thử
 ```
+
+### `get_file()` hoạt động thế nào
+
+```mermaid
+flowchart TD
+    A["get_file(result_json)"] --> B{Object hợp lệ<br/>+ env đủ?}
+    B -->|không| X[file_xml = None → trả về]
+    B -->|hợp lệ| C[Mở Chrome qua backend uc,<br/>giải Turnstile → lấy token]
+    C -->|lỗi kỹ thuật| E1{Còn lượt thử<br/>trong MAX_ATTEMPTS?}
+    C -->|có token| D[POST mst + sec + token<br/>tới VERIFY_ENDPOINT]
+    D -->|lỗi kỹ thuật| E1
+    D --> G{HTTP 2xx?}
+    G -->|không| R[file_xml = None → trả về]
+    G -->|có| H{Response JSON có field<br/>'xml' khác rỗng?}
+    H -->|không| R
+    H -->|có| I[Lưu XML vào logs/xmls/,<br/>file_xml = đường dẫn]
+    I --> ACC["trả về {file_pdf: None, file_xml: path}"]
+    E1 -->|còn| C
+    E1 -->|hết| EF[file_xml = None → trả về]
+```
+
+Khác `run_test.py`: không kiểm `downloaded.json` (luôn lấy mới), không
+phân nhánh `not_found` riêng (không có XML thì trả `None`), và retry bao
+trọn cả bước giải token lẫn gửi HTTP.
 
 Hợp đồng (contract):
 

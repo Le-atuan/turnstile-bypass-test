@@ -93,23 +93,23 @@ re-run only if the site's frontend changes.
 
 ```mermaid
 flowchart TD
-    A[For each {info: {tax_code, lookup_code}}<br/>entry in --cases file] --> B{Pair already in<br/>logs/downloaded.json?}
-    B -->|yes| S[skipped — final, no browser opened]
-    B -->|no| C[Open Chrome via uc backend,<br/>solve Turnstile → get token]
-    C -->|exception| E1[error]
-    C -->|token| D[POST token + tax_code + lookup_code<br/>to VERIFY_ENDPOINT]
+    A["For each info.tax_code / info.lookup_code<br/>entry in --cases file"] --> B{"Pair already in<br/>logs/downloaded.json?"}
+    B -->|yes| S["skipped — final, no browser opened"]
+    B -->|no| C["Open Chrome via uc backend,<br/>solve Turnstile, get token"]
+    C -->|exception| E1["error"]
+    C -->|token| D["POST token + tax_code + lookup_code<br/>to VERIFY_ENDPOINT"]
     D -->|exception| E1
-    D --> F{Response text matches<br/>NOT_FOUND_KEYWORDS?}
-    F -->|yes| N[not_found — final]
-    F -->|no| G{HTTP 2xx?}
-    G -->|no| R[rejected — final]
-    G -->|yes| H{response JSON has<br/>non-empty 'xml' field?}
+    D --> F{"Response text matches<br/>NOT_FOUND_KEYWORDS?"}
+    F -->|yes| N["not_found — final"]
+    F -->|no| G{"HTTP 2xx?"}
+    G -->|no| R["rejected — final"]
+    G -->|yes| H{"response JSON has<br/>non-empty xml field?"}
     H -->|no| R
-    H -->|yes| I[download_xml: save to DOWNLOAD_DIR,<br/>record pair in downloaded.json]
-    I --> ACC[accepted — final]
-    E1 --> J{Attempts left<br/>under MAX_ATTEMPTS?}
+    H -->|yes| I["download_xml: save to DOWNLOAD_DIR,<br/>record pair in downloaded.json"]
+    I --> ACC["accepted — final"]
+    E1 --> J{"Attempts left<br/>under MAX_ATTEMPTS?"}
     J -->|yes| C
-    J -->|no| EF[error — final]
+    J -->|no| EF["error — final"]
 ```
 
 For a single invoice, use `get_tracuu_einvoice365.py` instead — same
