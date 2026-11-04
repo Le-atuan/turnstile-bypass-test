@@ -75,7 +75,30 @@ from solver import _find_chrome, _get_profile_dir, _start_xvfb_if_needed, start_
 SITEURL = os.environ.get("TARGET_SITEURL", "https://tracuu.einvoice365.com/").strip()
 TEST_CASES = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
 TOKEN_WAIT_TIMEOUT = int(os.environ.get("TOKEN_WAIT_TIMEOUT", "20"))
-MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries per test case on failure
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries per test case, TECHNICAL failures only
+
+# Phrases that mean "the site answered normally — it just has no record for
+# this tax_code/lookup_code pair." This is a successful, expected outcome,
+# NOT a bug, so it must never trigger a retry — only a genuine step failure
+# (crash, timeout, selector not found, etc.) should retry.
+#
+# GUESS, NOT CONFIRMED: these are plausible Vietnamese e-invoice lookup
+# phrases, not copied from an actual observed response (no test run has hit
+# a real "not found" case yet). Check the real wording the first time this
+# happens — look at the logged page content / saved HTML — and adjust
+# NOT_FOUND_KEYWORDS in .env if it doesn't match.
+NOT_FOUND_KEYWORDS = [
+    kw.strip() for kw in os.environ.get(
+        "NOT_FOUND_KEYWORDS",
+        "không tìm thấy,không có dữ liệu,không tồn tại,not found,no data,no record",
+    ).split(",")
+    if kw.strip()
+]
+
+# Outcome labels returned by run_once() / run_with_retries().
+OUTCOME_SUCCESS = "success"      # page responded, no "not found" phrase matched
+OUTCOME_NOT_FOUND = "not_found"  # page responded with a "not found" phrase — final, not retried
+OUTCOME_ERROR = "error"          # a step crashed/timed out — retryable
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 RUN_STAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -124,6 +147,7 @@ def log_environment():
     logger.debug("TARGET_SITEURL=%s", SITEURL)
     logger.debug("TOKEN_WAIT_TIMEOUT=%s", TOKEN_WAIT_TIMEOUT)
     logger.debug("MAX_ATTEMPTS=%s", MAX_ATTEMPTS)
+    logger.debug("NOT_FOUND_KEYWORDS=%s", NOT_FOUND_KEYWORDS)
     logger.debug("TEST_CASES count=%s", len(TEST_CASES))
     logger.debug("===================")
 
@@ -206,12 +230,14 @@ async def dump_failure_artifacts(page, run_label: str, step: str):
         logger.warning("Could not save page HTML (non-fatal): %s", exc)
 
 
-async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
-    """Run one lookup attempt. Returns True on a clean completion, False on failure.
+async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
+    """Run one lookup attempt. Returns one of OUTCOME_SUCCESS / OUTCOME_NOT_FOUND
+    / OUTCOME_ERROR.
 
     Every step is wrapped individually so the log file shows exactly which
-    step failed and why, with a full traceback — and so one failing run
-    doesn't abort the remaining TEST_CASES.
+    step failed and why, with a full traceback. OUTCOME_ERROR is the only
+    retryable outcome — OUTCOME_NOT_FOUND means the site answered normally
+    with "no such invoice," which is a valid final result, not a bug.
     """
     logger.info("\n--- Run %s (tax_code=%s, lookup_code=%s) ---", run_label, tax_code, lookup_code)
     t0 = time.time()
@@ -223,7 +249,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
     except Exception:
         logger.error("Run %s: FAILED to start the browser.", run_label)
         logger.debug("Traceback:\n%s", traceback.format_exc())
-        return False
+        return OUTCOME_ERROR
 
     try:
         try:
@@ -231,7 +257,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
         except Exception:
             logger.error("Run %s: FAILED to navigate to %s", run_label, SITEURL)
             logger.debug("Traceback:\n%s", traceback.format_exc())
-            return False
+            return OUTCOME_ERROR
 
         logger.info("Waiting for the page's own Turnstile widget to resolve in the background...")
         try:
@@ -240,7 +266,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
             logger.error("Run %s: FAILED while polling for the Turnstile token.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "token_poll_error")
-            return False
+            return OUTCOME_ERROR
 
         if not got_token:
             logger.warning(
@@ -248,7 +274,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
                 "may be flagging this browser session.", run_label, TOKEN_WAIT_TIMEOUT
             )
             await dump_failure_artifacts(page, run_label, "no_token")
-            return False
+            return OUTCOME_ERROR
 
         logger.info("Token ready. Filling the real form like a human would...")
         try:
@@ -265,7 +291,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
             )
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "fill_mst_error")
-            return False
+            return OUTCOME_ERROR
 
         try:
             lookup_input = await page.select('input[placeholder="Mã tra cứu hóa đơn"]')
@@ -280,7 +306,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
             )
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "fill_lookup_error")
-            return False
+            return OUTCOME_ERROR
 
         try:
             submit_btn = await page.find("Tra cứu", best_match=True)
@@ -291,24 +317,37 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
             )
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "click_submit_error")
-            return False
+            return OUTCOME_ERROR
 
         logger.info("Submitted. Waiting for the page to respond...")
         await asyncio.sleep(3)
 
         try:
             body_text = await page.evaluate("document.body.innerText.slice(0, 600)")
-            logger.info("Page content after submit (first 600 chars):")
-            logger.info(body_text)
         except Exception:
             logger.error("Run %s: FAILED to read the page's response content.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "read_result_error")
-            return False
+            return OUTCOME_ERROR
+
+        logger.info("Page content after submit (first 600 chars):")
+        logger.info(body_text)
 
         elapsed = round(time.time() - t0, 2)
-        logger.info("Run %s completed in %ss.", run_label, elapsed)
-        return True
+        lowered = (body_text or "").lower()
+        matched_keyword = next((kw for kw in NOT_FOUND_KEYWORDS if kw.lower() in lowered), None)
+
+        if matched_keyword:
+            logger.warning(
+                "Run %s RESULT: NOT FOUND — page response matched \"%s\" (%ss). "
+                "Treated as a valid final outcome, not a test failure — not retried.",
+                run_label, matched_keyword, elapsed,
+            )
+            return OUTCOME_NOT_FOUND
+
+        logger.info("Run %s RESULT: SUCCESS — page responded with no known "
+                    "'not found' phrase, in %ss.", run_label, elapsed)
+        return OUTCOME_SUCCESS
 
     except Exception:
         # Catch-all safety net: anything not already caught above still gets
@@ -317,7 +356,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
         logger.debug("Traceback:\n%s", traceback.format_exc())
         if page is not None:
             await dump_failure_artifacts(page, run_label, "unexpected_error")
-        return False
+        return OUTCOME_ERROR
 
     finally:
         if browser is not None:
@@ -327,8 +366,12 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> bool:
                 logger.debug("browser.stop() raised (non-fatal):\n%s", traceback.format_exc())
 
 
-async def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> bool:
-    """Run one test case, retrying up to MAX_ATTEMPTS times on failure.
+async def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> str:
+    """Run one test case, retrying up to MAX_ATTEMPTS times — but ONLY on
+    OUTCOME_ERROR (a technical/step failure). OUTCOME_SUCCESS and
+    OUTCOME_NOT_FOUND are both final results and return immediately,
+    without any retry: "not found" is a legitimate answer from the site,
+    not something to retry away.
 
     Each attempt opens a fresh browser (run_once's own finally block closes
     it), so a retry starts clean rather than reusing a possibly-broken
@@ -337,24 +380,25 @@ async def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> b
     """
     for attempt in range(1, MAX_ATTEMPTS + 1):
         attempt_label = f"{run_label} (attempt {attempt}/{MAX_ATTEMPTS})"
-        ok = await run_once(attempt_label, tax_code, lookup_code)
-        if ok:
-            return True
+        outcome = await run_once(attempt_label, tax_code, lookup_code)
+
+        if outcome != OUTCOME_ERROR:
+            return outcome  # success or not_found — final, no retry
 
         if attempt < MAX_ATTEMPTS:
             backoff = random.uniform(2, 5) * attempt
             logger.warning(
-                "Run %s failed — retrying in %.1fs (attempt %d/%d)...",
+                "Run %s: technical error — retrying in %.1fs (attempt %d/%d)...",
                 run_label, backoff, attempt + 1, MAX_ATTEMPTS,
             )
             await asyncio.sleep(backoff)
         else:
             logger.error(
-                "Run %s: all %d attempt(s) failed. See the log file for details.",
-                run_label, MAX_ATTEMPTS,
+                "Run %s: all %d attempt(s) failed with technical errors. "
+                "See the log file for details.", run_label, MAX_ATTEMPTS,
             )
 
-    return False
+    return OUTCOME_ERROR
 
 
 async def main():
@@ -386,21 +430,26 @@ async def main():
                 results.append(False)
                 continue
 
-            ok = await run_with_retries(f"{i}/{total}", tax_code, lookup_code)
-            results.append(ok)
+            outcome = await run_with_retries(f"{i}/{total}", tax_code, lookup_code)
+            results.append(outcome)
             if i < total:
                 await asyncio.sleep(random.uniform(2, 5))
     finally:
         if xvfb:
             xvfb.terminate()
 
-    succeeded = sum(1 for r in results if r)
+    succeeded = results.count(OUTCOME_SUCCESS)
+    not_found = results.count(OUTCOME_NOT_FOUND)
+    errored = results.count(OUTCOME_ERROR)
     logger.info("\n" + "=" * 70)
-    logger.info("SUMMARY: %d/%d run(s) completed without error.", succeeded, len(results))
-    if succeeded < len(results):
+    logger.info(
+        "SUMMARY: %d/%d found | %d/%d not found (valid result) | %d/%d technical error",
+        succeeded, len(results), not_found, len(results), errored, len(results),
+    )
+    if errored:
         logger.info(
-            "Some runs failed — see this run's full log for tracebacks and the "
-            "exact step that failed:\n    %s", LOG_FILE
+            "Technical errors occurred even after retries — see this run's full "
+            "log for tracebacks and the exact step that failed:\n    %s", LOG_FILE
         )
         logger.info(
             "Any saved screenshots/HTML snapshots for failed steps are in:\n    %s",

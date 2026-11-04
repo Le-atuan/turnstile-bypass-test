@@ -187,17 +187,30 @@ hàm cụ thể (`page.select`, `page.find`, `element.send_keys`) cần được
 xác nhận lại với phiên bản nodriver bạn đã cài, ở lần chạy đầu tiên trên
 máy bạn.
 
-### Thử lại (retry)
+### Thử lại — chỉ khi lỗi kỹ thuật, không bao giờ cho "không tìm thấy"
 
-Mỗi phần tử trong `TEST_CASES` được thử lại tối đa `MAX_ATTEMPTS` lần
-(mặc định 3) nếu bất kỳ bước nào thất bại — khởi chạy browser, điều
-hướng, chờ token, điền form, bấm submit, hoặc đọc kết quả. Mỗi lần thử
-mở một browser hoàn toàn mới (browser của lần thử trước luôn được đóng
-trước), nên lần thử lại không bao giờ dùng lại một session có thể đã bị
-hỏng. Có một khoảng chờ ngẫu nhiên (tăng dần theo mỗi lần thử) giữa các
-lần thử để không dồn dập request vào site. Nếu tất cả các lần thử của
-một bộ dữ liệu đều thất bại, script ghi log lại và chuyển sang phần tử
-tiếp theo trong `TEST_CASES` thay vì dừng toàn bộ.
+Mỗi lần chạy kết thúc với đúng 1 trong 3 kết quả:
+
+| Kết quả | Ý nghĩa | Có thử lại không? |
+|---|---|---|
+| `success` | Trang phản hồi bình thường và không khớp từ khóa "không tìm thấy" nào (xem `NOT_FOUND_KEYWORDS`) — lượt tra cứu có vẻ đã trả về dữ liệu. | Không — kết quả cuối. |
+| `not_found` | Trang phản hồi bình thường, nhưng với cụm từ nghĩa là "không có bản ghi cho bộ dữ liệu này." Đây là câu trả lời hợp lệ, đúng như kỳ vọng từ phía site, **không phải lỗi**. | Không — kết quả cuối, hiển thị đúng như vậy. |
+| `error` | Chính một bước bị crash hoặc timeout (khởi chạy browser, điều hướng, chờ token, điền form, bấm submit, hoặc đọc kết quả). | **Có**, tối đa `MAX_ATTEMPTS` lần (mặc định 3). |
+
+Chỉ `error` mới được thử lại. Mỗi lần thử lại mở một browser hoàn toàn
+mới (browser của lần thử trước luôn được đóng trước), nên lần thử lại
+không bao giờ dùng lại một session có thể đã bị hỏng. Có một khoảng chờ
+ngẫu nhiên (tăng dần theo mỗi lần thử) giữa các lần thử để không dồn dập
+request vào site. Nếu tất cả các lần thử của một bộ dữ liệu vẫn kết
+thúc bằng `error`, script ghi log lại và chuyển sang phần tử tiếp theo
+trong `TEST_CASES` thay vì dừng toàn bộ.
+
+`NOT_FOUND_KEYWORDS` trong `.env.example` là một danh sách **suy đoán,
+chưa được xác nhận** các cụm từ tiếng Việt/tiếng Anh — chưa có lần chạy
+test nào thực sự gặp phải một phản hồi "không tìm thấy" thật. Lần đầu
+tiên gặp trường hợp đó, hãy kiểm tra nội dung trang được ghi trong log
+(hoặc HTML đã lưu, nếu bạn thêm việc lưu artifact cho trường hợp này) và
+chỉnh lại danh sách nếu câu chữ thật của site khác.
 
 ### Logging & xử lý sự cố
 

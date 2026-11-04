@@ -167,17 +167,29 @@ real Chrome and no network path to the target, so the exact method names
 against your installed nodriver version the first time you run it
 locally.
 
-### Retries
+### Retries — technical errors only, never for "not found"
 
-Each `TEST_CASES` entry is retried up to `MAX_ATTEMPTS` times (default
-3) if any step fails — browser launch, navigation, the token wait, a
-form fill, the submit click, or reading the result. Each attempt opens a
-completely fresh browser (a prior attempt's browser is always closed
-first), so a retry never reuses a possibly-broken session. A randomized
-backoff (longer on each successive attempt) separates attempts so
-retries don't hammer the site back-to-back. If all attempts for a case
-fail, the script logs that and moves on to the next `TEST_CASES` entry
-rather than aborting the whole run.
+Every run ends in exactly one of three outcomes:
+
+| Outcome | What it means | Retried? |
+|---|---|---|
+| `success` | The page responded and no "not found" phrase (see `NOT_FOUND_KEYWORDS`) matched — the lookup appears to have returned data. | No — final result. |
+| `not_found` | The page responded normally, but with a phrase meaning "no record for this pair." This is a valid, expected answer from the site, **not a bug**. | No — final result, reported as-is. |
+| `error` | A step itself crashed or timed out (browser launch, navigation, the token wait, a form fill, the submit click, or reading the result). | **Yes**, up to `MAX_ATTEMPTS` times (default 3). |
+
+Only `error` is retried. Each retry attempt opens a completely fresh
+browser (a prior attempt's browser is always closed first), so a retry
+never reuses a possibly-broken session. A randomized backoff (longer on
+each successive attempt) separates attempts so retries don't hammer the
+site back-to-back. If all attempts for a case still end in `error`, the
+script logs that and moves on to the next `TEST_CASES` entry rather than
+aborting the whole run.
+
+`NOT_FOUND_KEYWORDS` in `.env.example` is a **guessed, unconfirmed** list
+of Vietnamese/English phrases — no test run has actually hit a real "not
+found" response yet. The first time one does, check the logged page
+content (or the saved HTML, if you add artifact-dumping for that case)
+and adjust the list if the site's real wording differs.
 
 ### Logging & troubleshooting
 
