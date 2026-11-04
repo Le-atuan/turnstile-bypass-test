@@ -4,9 +4,8 @@
 
 Integrates [`ismoiloffS/EzSolver`](https://github.com/ismoiloffS/EzSolver)
 (MIT) to test our own `tracuu.einvoice365.com` lookup page. See the
-[`main` branch](../../tree/main) for the project overview and the
-comparison with `Turnstile-Solver`. Install/run steps:
-[`SETUP.md`](SETUP.md) / [`SETUP.vi.md`](SETUP.vi.md).
+[`main` branch](../../tree/main) for the project overview. Install/run
+steps: [`SETUP.md`](SETUP.md) / [`SETUP.vi.md`](SETUP.vi.md).
 
 ## Two tests
 

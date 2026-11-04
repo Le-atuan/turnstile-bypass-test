@@ -4,9 +4,8 @@
 
 Tích hợp [`ismoiloffS/EzSolver`](https://github.com/ismoiloffS/EzSolver)
 (MIT) để test trang tra cứu `tracuu.einvoice365.com` của chúng ta. Xem
-[nhánh `main`](../../tree/main) để có tổng quan và bảng so sánh với
-`Turnstile-Solver`. Hướng dẫn cài/chạy: [`SETUP.md`](SETUP.md) /
-[`SETUP.vi.md`](SETUP.vi.md).
+[nhánh `main`](../../tree/main) để có tổng quan. Hướng dẫn cài/chạy:
+[`SETUP.md`](SETUP.md) / [`SETUP.vi.md`](SETUP.vi.md).
 
 ## Hai bài test
 

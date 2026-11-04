@@ -40,6 +40,12 @@ def _find_chrome() -> str:
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
         ]
+    elif platform.system() == "Darwin":  # macOS
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
     else:
         candidates = [
             "/usr/bin/google-chrome-stable",
