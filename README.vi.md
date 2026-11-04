@@ -211,19 +211,15 @@ import os, sys
 VENDOR = os.path.join(os.path.dirname(__file__), "..", "turnstile-bypass-test")
 sys.path.insert(0, os.path.abspath(VENDOR))
 
-# Drop-in 1-1: class cùng tên — chỉ đổi đúng dòng import này.
-from get_tracuu_einvoice365 import GetFolderTraCuuEinvoice365
+from get_tracuu_einvoice365 import get_file
 
-def lay_hoa_don(result_json, download_dir):
+def lay_hoa_don(result_json):
     # result_json là object API bên bạn trả về
-    result = GetFolderTraCuuEinvoice365().get_file(result_json, download_dir)
-    # -> {"file_pdf": None, "file_xml": "<download_dir>/invoice_...xml" | None}
+    result = get_file(result_json)             # tùy chọn: get_file(result_json, download_dir="/thư/mục/của/bạn")
+    # -> {"file_pdf": None, "file_xml": "/abs/path/invoice_...xml" | None}
     return result
 ```
 
-XML được ghi vào **đúng `download_dir` bạn truyền** — y hệt class cũ — nên
-code nào đang đọc file từ thư mục đó không bị ảnh hưởng. Cũng có sẵn hàm
-`get_file(result_json, download_dir)` nếu bạn không muốn dùng class.
 `EzSolver/` được thêm vào path tự động (theo vị trí file module), nên thư
 mục làm việc không quan trọng.
 

@@ -3,23 +3,11 @@
 Single-invoice fetch for tracuu.einvoice365.com (ezsolver-v2 branch).
 
 Integration entry point. Takes ONE result_json object (not a list) and
-returns one file, as a drop-in for the DrissionPage-based
-GetFolderTraCuuEinvoice365.get_file. Two ways to call it:
+returns one file, mirroring GetFolderTraCuuEinvoice365.get_file:
 
-    # 1) True drop-in — only the import line changes at your call sites:
-    from get_tracuu_einvoice365 import GetFolderTraCuuEinvoice365
-    result = GetFolderTraCuuEinvoice365().get_file(result_json, download_dir)
-
-    # 2) Plain function:
     from get_tracuu_einvoice365 import get_file
-    result = get_file(result_json, download_dir)
-    # -> {"file_pdf": None, "file_xml": "<download_dir>/invoice_...xml"}  (file_xml=None on miss)
-
-The XML is written into the SAME `download_dir` you pass in — identical to
-the old class — so downstream that reads from that folder is unaffected.
-This implementation fetches the XML over HTTP (via the uc Turnstile
-backend) instead of driving the UI, so it never produces a PDF: file_pdf
-is always None.
+    result = get_file({"info": {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"}})
+    # -> {"file_pdf": None, "file_xml": "/abs/path/invoice_...xml"}  (file_xml=None on miss)
 
 Run standalone to fetch one file (see --help). For the many-cases test
 harness, use run_test.py instead.
@@ -159,18 +147,6 @@ def get_file(result_json: dict, download_dir: str = None) -> dict:
                 logger.warning("Technical error — retrying (%d/%d)...", attempt + 1, MAX_ATTEMPTS)
 
     return dict_result
-
-
-class GetFolderTraCuuEinvoice365:
-    """Drop-in replacement for the DrissionPage-based class of the same name.
-
-    Same call site: `GetFolderTraCuuEinvoice365().get_file(result_json, download_dir)`.
-    Swap only the import to migrate. The XML lands in the `download_dir` you
-    pass (same as the old class); file_pdf is always None (XML-only over HTTP).
-    """
-
-    def get_file(self, result_json: dict, download_dir: str = None) -> dict:
-        return get_file(result_json, download_dir=download_dir)
 
 
 def _load_single_case(args) -> dict:
