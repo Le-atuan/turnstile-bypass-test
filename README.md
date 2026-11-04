@@ -213,17 +213,21 @@ import os, sys
 VENDOR = os.path.join(os.path.dirname(__file__), "..", "turnstile-bypass-test")
 sys.path.insert(0, os.path.abspath(VENDOR))
 
-from get_tracuu_einvoice365 import get_file
+# True drop-in: a class of the same name — only this import line changes.
+from get_tracuu_einvoice365 import GetFolderTraCuuEinvoice365
 
-def fetch_invoice(result_json):
+def fetch_invoice(result_json, download_dir):
     # result_json is the object your own API returns
-    result = get_file(result_json)             # optional: get_file(result_json, download_dir="/your/dir")
-    # -> {"file_pdf": None, "file_xml": "/abs/path/invoice_...xml" | None}
+    result = GetFolderTraCuuEinvoice365().get_file(result_json, download_dir)
+    # -> {"file_pdf": None, "file_xml": "<download_dir>/invoice_...xml" | None}
     return result
 ```
 
-`EzSolver/` is added to the path automatically (relative to the module
-file), so the working directory doesn't matter.
+The XML is written into the **same `download_dir` you pass** — identical to
+the old class — so code that reads files from that folder is unaffected.
+There is also a plain `get_file(result_json, download_dir)` function if you
+prefer not to use the class. `EzSolver/` is added to the path automatically
+(relative to the module file), so the working directory doesn't matter.
 
 ### How `get_file()` works
 
