@@ -207,17 +207,44 @@ def already_downloaded(tax_code: str, lookup_code: str) -> bool:
     return _pair_key(tax_code, lookup_code) in load_downloaded()
 
 
-def save_xml(run_label: str, tax_code: str, lookup_code: str, xml_content: str) -> str:
+def save_xml(run_label: str, tax_code: str, lookup_code: str, xml_content: str, out_dir: str = None) -> str:
     """Saves the XML extracted from the api/search response's own `xml` field
     (the real page never makes a second HTTP call for it — see portal.js:
     the "Tải XML" button just Blob()s this same field). Returns the file path."""
-    xml_dir = os.path.join(LOG_DIR, "xmls")
+    xml_dir = out_dir or os.path.join(LOG_DIR, "xmls")
     os.makedirs(xml_dir, exist_ok=True)
     safe_label = run_label.replace("/", "-").replace(" ", "_").replace("(", "").replace(")", "")
     path = os.path.join(xml_dir, f"invoice_{tax_code}_{lookup_code}_{safe_label}.xml")
     with open(path, "w", encoding="utf-8") as f:
         f.write(xml_content)
     return path
+
+
+def get_file(result_json: dict, download_dir: str = None) -> dict:
+    """Same input/output shape as GetFolderTraCuuEinvoice365.get_file (the
+    Cloudflare-blocked browser-form approach a colleague tried) — swap one
+    for the other in callers. Backed by the raw-HTTP Turnstile bypass, which
+    has no PDF step, so file_pdf is always None."""
+    dict_result = {"file_pdf": None, "file_xml": None}
+    try:
+        tax_code = result_json["info"]["tax_code"]
+        lookup_code = result_json["info"]["lookup_code"]
+    except (KeyError, TypeError):
+        return dict_result
+
+    run_label = f"{tax_code}/{lookup_code}"
+    try:
+        token = step1_solve_token(run_label)
+        resp = step2_verify_with_backend(token, tax_code, lookup_code)
+        xml_content = resp.json().get("xml") if 200 <= resp.status_code < 300 else None
+    except Exception:
+        return dict_result
+
+    if xml_content:
+        dict_result["file_xml"] = save_xml(run_label, tax_code, lookup_code, xml_content, out_dir=download_dir)
+        mark_downloaded(tax_code, lookup_code)
+
+    return dict_result
 
 
 def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
