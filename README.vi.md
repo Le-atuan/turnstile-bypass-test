@@ -119,16 +119,29 @@ riêng, qua `ThreadPoolExecutor`); chỉ `error` mới retry — `skipped`,
 
 ## Kết quả & thử lại
 
-Chỉ **lỗi kỹ thuật** mới retry (tối đa `MAX_ATTEMPTS`) — câu trả lời
-thật từ site luôn là kết quả cuối.
+Kết quả được phân loại theo **tín hiệu HTTP thật** (status, header
+`Retry-After`, dấu hiệu Cloudflare, cấu trúc JSON) — kiểm tra chặn/giới-hạn
+**trước** cụm "không tìm thấy", nên trang bị chặn không bị dán nhầm thành
+"không tìm thấy". Chỉ lỗi kỹ thuật tạm thời mới retry (tối đa `MAX_ATTEMPTS`);
+câu trả lời thật từ site luôn là kết quả cuối.
 
 | Kết quả | Nghĩa là | Retry? |
 |---|---|---|
-| `accepted` | HTTP 2xx và đã lưu được file XML | Không |
-| `rejected` | Backend trả non-2xx | Không |
-| `not_found` | Response khớp `NOT_FOUND_KEYWORDS` (hợp lệ: "không có bản ghi") | Không |
+| `accepted` | HTTP 2xx và có/lưu được XML | Không |
+| `not_found` | 2xx, không xml, thông báo "không có bản ghi" thật (`NOT_FOUND_KEYWORDS`) | Không |
+| `rate_limited` | HTTP 429 hoặc có header `Retry-After` — bị giới hạn tần suất | Không |
+| `blocked` | Bị chặn / challenge bot (`cf-mitigated`, cụm trong `CHALLENGE_MARKERS`, hoặc HTML ở 403/503) | Không |
+| `server_error` | HTTP 5xx — lỗi tạm thời | **Có** |
+| `rejected` | non-2xx khác, hoặc 2xx không xml và không rõ lý do | Không |
 | `error` | Lấy token hoặc gửi HTTP request thất bại | **Có** |
 | `skipped` | XML đã được tải ở lần chạy trước | Không |
+
+`rate_limited` và `blocked` chính là tín hiệu **phòng thủ tầng 2**: khi một
+hóa đơn hợp lệ (tra tay vẫn thấy) lại trả về một trong hai loại này sau một
+loạt request tự động, đó là site đang chặn bot. Status + headers + trích
+body của mọi lần chạy không-accepted được ghi ở mức DEBUG trong file `logs/`
+để xác nhận đúng loại. Chỉnh nhận diện qua `RATE_LIMIT_STATUSES` và
+`CHALLENGE_MARKERS` trong `.env`.
 
 ## Chạy song song nhiều bộ
 

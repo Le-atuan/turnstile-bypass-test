@@ -121,16 +121,29 @@ its own browser, via `ThreadPoolExecutor`); only `error` retries — `skipped`,
 
 ## Outcomes & retries
 
-Only a **technical error** retries (up to `MAX_ATTEMPTS`). A real answer
-from the site is always final.
+The response is classified by **real HTTP signals** (status, `Retry-After`,
+Cloudflare markers, JSON shape) — block/limit is checked **before** the
+not-found phrase, so a challenge page can't be mislabeled as "not found".
+Only transient technical errors retry (up to `MAX_ATTEMPTS`); a real answer
+is always final.
 
 | Outcome | Meaning | Retried? |
 |---|---|---|
-| `accepted` | HTTP 2xx and the XML was actually saved | No |
-| `rejected` | Backend returned non-2xx | No |
-| `not_found` | Response matched `NOT_FOUND_KEYWORDS` (valid "no record") | No |
-| `error` | Token acquisition or the HTTP request itself failed | **Yes** |
+| `accepted` | HTTP 2xx and the XML was present/saved | No |
+| `not_found` | 2xx, no xml, a genuine "no record" message (`NOT_FOUND_KEYWORDS`) | No |
+| `rate_limited` | HTTP 429 or a `Retry-After` header — throttled | No |
+| `blocked` | Bot challenge / WAF block (`cf-mitigated`, a `CHALLENGE_MARKERS` phrase, or HTML on 403/503) | No |
+| `server_error` | HTTP 5xx — transient | **Yes** |
+| `rejected` | Other non-2xx, or 2xx with no xml and no clear reason | No |
+| `error` | Token acquisition or the HTTP call itself failed | **Yes** |
 | `skipped` | XML already downloaded in a previous run | No |
+
+`rate_limited` and `blocked` are the second-layer-defense signals: when a
+valid invoice (one a manual lookup still finds) comes back as one of these
+after a burst of automated requests, that's the site throttling the bot.
+Full status + headers + body snippet for every non-accepted run are in the
+`logs/` file at DEBUG level, to confirm which category it really is.
+Tune detection via `RATE_LIMIT_STATUSES` and `CHALLENGE_MARKERS` in `.env`.
 
 ## Running several in parallel
 

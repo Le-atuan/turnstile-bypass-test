@@ -59,7 +59,8 @@ MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries on technical 
 SOLVER_BACKEND = os.environ.get("SOLVER_BACKEND", "uc").strip()  # nodriver | uc
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "1"))  # >1 runs test cases concurrently, each its own browser
 
-# Phrases meaning "no record found" — guessed; adjust once a real one is seen.
+# Phrases meaning "no record found" — only trusted on a 2xx JSON response,
+# so a block page containing similar text is NOT mislabeled as not_found.
 NOT_FOUND_KEYWORDS = [
     kw.strip() for kw in os.environ.get(
         "NOT_FOUND_KEYWORDS",
@@ -68,12 +69,30 @@ NOT_FOUND_KEYWORDS = [
     if kw.strip()
 ]
 
-# Only "error" is retried; the rest are final.
-OUTCOME_ACCEPTED = "accepted"    # backend 2xx
-OUTCOME_REJECTED = "rejected"    # backend non-2xx
-OUTCOME_NOT_FOUND = "not_found"  # matched a "not found" phrase
-OUTCOME_ERROR = "error"          # token acquisition or HTTP request itself failed
-OUTCOME_SKIPPED = "skipped"      # XML already downloaded in a previous run
+# HTTP statuses that mean "rate limited".
+RATE_LIMIT_STATUSES = {
+    int(s) for s in os.environ.get("RATE_LIMIT_STATUSES", "429").replace(" ", "").split(",") if s
+}
+
+# Body/markers that mean "bot challenge / WAF block" (Cloudflare etc.).
+CHALLENGE_MARKERS = [
+    m.strip().lower() for m in os.environ.get(
+        "CHALLENGE_MARKERS",
+        "just a moment,attention required,challenge-platform,__cf_chl,cf-chl,"
+        "captcha,access denied,request blocked,error 1020,error 1015",
+    ).split(",")
+    if m.strip()
+]
+
+# Only "error" and "server_error" are retried; the rest are final.
+OUTCOME_ACCEPTED = "accepted"          # 2xx and the XML was present
+OUTCOME_NOT_FOUND = "not_found"        # 2xx, no xml, a genuine "no record" message
+OUTCOME_RATE_LIMITED = "rate_limited"  # HTTP 429 / Retry-After — throttled
+OUTCOME_BLOCKED = "blocked"            # bot challenge / WAF block (Cloudflare)
+OUTCOME_SERVER_ERROR = "server_error"  # 5xx — transient, retried
+OUTCOME_REJECTED = "rejected"          # other non-2xx, or 2xx with no xml and no clear reason
+OUTCOME_ERROR = "error"                # token acquisition or the HTTP call itself failed
+OUTCOME_SKIPPED = "skipped"            # XML already downloaded in a previous run
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "").strip() or os.path.join(LOG_DIR, "xmls")
@@ -215,6 +234,56 @@ def get_file(result_json: dict, download_dir: str = None) -> dict:
     return dict_result
 
 
+# Distinct, greppable label + log level per outcome (for the console/log file).
+OUTCOME_LABELS = {
+    OUTCOME_NOT_FOUND: ("NOT_FOUND (hóa đơn không tồn tại — kết quả thật)", logging.WARNING),
+    OUTCOME_RATE_LIMITED: ("RATE_LIMITED (bị giới hạn tần suất)", logging.ERROR),
+    OUTCOME_BLOCKED: ("BLOCKED (bị chặn / challenge bot)", logging.ERROR),
+    OUTCOME_SERVER_ERROR: ("SERVER_ERROR (lỗi phía server)", logging.ERROR),
+    OUTCOME_REJECTED: ("REJECTED (2xx nhưng không có xml / lý do không rõ)", logging.WARNING),
+}
+
+
+def classify_response(resp) -> tuple:
+    """Classify a backend response. Returns (outcome, detail). Checks block/limit
+    BEFORE the not-found phrase so a challenge page can't masquerade as not_found."""
+    status = resp.status_code
+    lowered = (resp.text or "").lower()
+    ctype = resp.headers.get("Content-Type", "").lower()
+    retry_after = resp.headers.get("Retry-After")
+    cf_mitigated = resp.headers.get("cf-mitigated")
+
+    # 1. Rate limit — explicit status or a Retry-After header.
+    if status in RATE_LIMIT_STATUSES or retry_after:
+        return OUTCOME_RATE_LIMITED, f"HTTP {status}, Retry-After={retry_after}"
+
+    # 2. Bot challenge / WAF block — CF header, a known marker, or HTML on a 403/503.
+    marker = next((m for m in CHALLENGE_MARKERS if m in lowered), None)
+    if cf_mitigated or marker or (status in (403, 503) and "text/html" in ctype):
+        why = (f"cf-mitigated={cf_mitigated}" if cf_mitigated
+               else f"marker '{marker}'" if marker else f"HTTP {status} HTML body")
+        return OUTCOME_BLOCKED, f"HTTP {status}, {why}"
+
+    # 3. Server error — transient, retried.
+    if 500 <= status < 600:
+        return OUTCOME_SERVER_ERROR, f"HTTP {status}"
+
+    # 4. Other non-2xx.
+    if not (200 <= status < 300):
+        return OUTCOME_REJECTED, f"HTTP {status}"
+
+    # 5. 2xx — inspect the JSON envelope.
+    try:
+        data = resp.json()
+    except ValueError:
+        return OUTCOME_REJECTED, f"HTTP {status}, non-JSON body"
+    if isinstance(data, dict) and data.get("xml"):
+        return OUTCOME_ACCEPTED, None
+    if any(kw.lower() in lowered for kw in NOT_FOUND_KEYWORDS):
+        return OUTCOME_NOT_FOUND, f"HTTP {status}, no xml, matched a not-found phrase"
+    return OUTCOME_REJECTED, f"HTTP {status}, 2xx but no xml and no not-found marker"
+
+
 def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
     """Runs one test case; `accepted` only when the XML was actually saved."""
     t0 = time.time()
@@ -238,56 +307,46 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
         return OUTCOME_ERROR
 
     elapsed = round(time.time() - t0, 2)
-    lowered = (resp.text or "").lower()
-    matched_keyword = next((kw for kw in NOT_FOUND_KEYWORDS if kw.lower() in lowered), None)
+    outcome, detail = classify_response(resp)
+    snippet = (resp.text or "")[:300].replace("\n", " ")
 
-    if matched_keyword:
-        logger.warning("Run %s RESULT: NOT FOUND — matched \"%s\" (%ss). Final, not retried.",
-                       run_label, matched_keyword, elapsed)
-        return OUTCOME_NOT_FOUND
+    if outcome == OUTCOME_ACCEPTED:
+        xml_path = download_xml(run_label, tax_code, lookup_code, resp.json().get("xml"), DOWNLOAD_DIR)
+        logger.info("Run %s RESULT: ACCEPTED — XML saved to %s (%ss).", run_label, xml_path, elapsed)
+        return OUTCOME_ACCEPTED
 
-    if not (200 <= resp.status_code < 300):
-        logger.info("Run %s RESULT: REJECTED (HTTP %s, %ss). Final — not retried.",
-                    run_label, resp.status_code, elapsed)
-        return OUTCOME_REJECTED
+    label, level = OUTCOME_LABELS.get(outcome, (outcome.upper(), logging.WARNING))
+    retried = " — sẽ thử lại" if outcome == OUTCOME_SERVER_ERROR else " — kết quả cuối"
+    logger.log(level, "Run %s RESULT: %s — %s (%ss)%s", run_label, label, detail, elapsed, retried)
+    logger.debug("Run %s response: HTTP %s | headers=%s | body[:300]=%s",
+                 run_label, resp.status_code, dict(resp.headers), snippet)
+    return outcome
 
-    try:
-        xml_content = resp.json().get("xml")
-    except ValueError:
-        xml_content = None
 
-    if not xml_content:
-        logger.warning("Run %s RESULT: REJECTED — HTTP 2xx but no 'xml' field in the response "
-                       "(%ss). Bypass alone isn't a successful test.", run_label, elapsed)
-        return OUTCOME_REJECTED
-
-    xml_path = download_xml(run_label, tax_code, lookup_code, xml_content, DOWNLOAD_DIR)
-    logger.info("Run %s RESULT: ACCEPTED — XML saved to %s (%ss). Final — not retried.",
-                run_label, xml_path, elapsed)
-    return OUTCOME_ACCEPTED
+RETRYABLE = {OUTCOME_ERROR, OUTCOME_SERVER_ERROR}  # transient; rate_limited/blocked/not_found are final
 
 
 def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> str:
-    """Retry a case up to MAX_ATTEMPTS times, but only on a technical error."""
+    """Retry a case up to MAX_ATTEMPTS times, but only on a transient technical error."""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         attempt_label = f"{run_label} (attempt {attempt}/{MAX_ATTEMPTS})"
         outcome = run_once(attempt_label, tax_code, lookup_code)
 
-        if outcome != OUTCOME_ERROR:
+        if outcome not in RETRYABLE:
             return outcome
 
         if attempt < MAX_ATTEMPTS:
             logger.warning(
-                "Run %s: technical error — retrying (attempt %d/%d)...",
-                run_label, attempt + 1, MAX_ATTEMPTS,
+                "Run %s: transient error (%s) — retrying (attempt %d/%d)...",
+                run_label, outcome, attempt + 1, MAX_ATTEMPTS,
             )
         else:
             logger.error(
-                "Run %s: all %d attempt(s) failed with technical errors. "
-                "See the log file for details.", run_label, MAX_ATTEMPTS,
+                "Run %s: all %d attempt(s) failed (%s). See the log file for details.",
+                run_label, MAX_ATTEMPTS, outcome,
             )
 
-    return OUTCOME_ERROR
+    return outcome  # last transient outcome (error or server_error)
 
 
 def run_test_cases(test_cases: list) -> list:
@@ -345,18 +404,26 @@ def run_test_cases(test_cases: list) -> list:
         for i, tax_code, lookup_code in jobs:
             results[i - 1] = run_with_retries(f"{i}/{total}", tax_code, lookup_code)
 
-    accepted = results.count(OUTCOME_ACCEPTED)
-    rejected = results.count(OUTCOME_REJECTED)
-    not_found = results.count(OUTCOME_NOT_FOUND)
-    errored = results.count(OUTCOME_ERROR)
-    skipped = results.count(OUTCOME_SKIPPED)
+    counts = {o: results.count(o) for o in (
+        OUTCOME_ACCEPTED, OUTCOME_NOT_FOUND, OUTCOME_RATE_LIMITED, OUTCOME_BLOCKED,
+        OUTCOME_SERVER_ERROR, OUTCOME_REJECTED, OUTCOME_ERROR, OUTCOME_SKIPPED,
+    )}
 
-    logger.info(
-        "SUMMARY: %d/%d accepted | %d/%d rejected | %d/%d not found | %d/%d error | %d/%d skipped",
-        accepted, total, rejected, total, not_found, total, errored, total, skipped, total,
-    )
-    if errored:
-        logger.info("See %s for tracebacks on the %d error(s).", LOG_FILE, errored)
+    logger.info("SUMMARY (total %d):", total)
+    logger.info("  accepted     = %d   (lấy được XML)", counts[OUTCOME_ACCEPTED])
+    logger.info("  not_found    = %d   (hóa đơn không tồn tại — kết quả thật)", counts[OUTCOME_NOT_FOUND])
+    logger.info("  rate_limited = %d   (bị giới hạn tần suất)", counts[OUTCOME_RATE_LIMITED])
+    logger.info("  blocked      = %d   (bị chặn / challenge bot)", counts[OUTCOME_BLOCKED])
+    logger.info("  server_error = %d   (lỗi phía server)", counts[OUTCOME_SERVER_ERROR])
+    logger.info("  rejected     = %d   (2xx không xml / không rõ)", counts[OUTCOME_REJECTED])
+    logger.info("  error        = %d   (lấy token / HTTP hỏng)", counts[OUTCOME_ERROR])
+    logger.info("  skipped      = %d   (đã tải trước đó)", counts[OUTCOME_SKIPPED])
+
+    if counts[OUTCOME_RATE_LIMITED] or counts[OUTCOME_BLOCKED]:
+        logger.info("-> Có dấu hiệu phòng thủ tầng 2 (rate-limit / chặn bot). Xem body response "
+                    "ở log DEBUG (%s) để xác nhận và lấy số liệu cho báo cáo.", LOG_FILE)
+    if counts[OUTCOME_ERROR] or counts[OUTCOME_SERVER_ERROR]:
+        logger.info("See %s for tracebacks / raw responses.", LOG_FILE)
 
     return results
 
