@@ -1,30 +1,20 @@
 #!/usr/bin/env python3
 """
-Turnstile defensive test harness — ezsolver branch
------------------------------------------------------
-Purpose: as the operator of TARGET_SITEURL, measure whether an
-off-the-shelf browser-automation solver (EzSolver) can obtain a Turnstile
-token for your own page, and whether your backend's verification logic
-actually accepts that token — for several real, owner-authorized
-tax_code/lookup_code pairs (TEST_CASES), not just one.
+Turnstile defensive test harness (ezsolver branch).
 
-This is NOT a generic bypass tool against third-party sites. Point it only
-at infrastructure you own or are explicitly authorized to test. Running it
-against a site you don't control or lack permission for is out of scope.
+For each TEST_CASES entry: get a Turnstile token via EzSolver, then send
+a raw HTTP POST to the backend endpoint to see if it accepts a token with
+no real browser session behind it. For a test that drives the real
+form/button, see run_ui_test.py.
 
-Note: EzSolver's solve_on_page() wipes the real page's DOM before solving
-(see README.md's correction). That's irrelevant here — this script never
-needs the real form, because it submits the token via a raw HTTP POST to
-VERIFY_ENDPOINT, not by clicking the real button. For a test that drives
-the REAL form/button instead, see run_ui_test.py.
+Only run against infrastructure you own or are authorized to test.
 
 Usage:
-    cp .env.example .env   # fill in your real values
+    cp .env.example .env
     pip install -r requirements.txt
     python run_test.py
 
-Requires: Python 3.8+, real Chrome installed, (Linux headless: Xvfb),
-this directory's EzSolver/ checkout.
+Requires Python 3.8+, real Chrome (Xvfb on headless Linux), the EzSolver/ checkout.
 """
 import json
 import logging
@@ -51,11 +41,9 @@ VERIFY_METHOD = os.environ.get("VERIFY_METHOD", "POST").strip().upper()
 VERIFY_TOKEN_FIELD = os.environ.get("VERIFY_TOKEN_FIELD", "cf-turnstile-response").strip()
 VERIFY_EXTRA_FIELDS = json.loads(os.environ.get("VERIFY_EXTRA_FIELDS", "{}") or "{}")
 TEST_CASES = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
-MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries per test case, TECHNICAL failures only
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries on technical failure only
 
-# GUESS, NOT CONFIRMED against the real backend response — see
-# run_ui_test.py's NOT_FOUND_KEYWORDS comment. Adjust once a real "not
-# found" response has actually been observed.
+# Phrases meaning "no record found" — guessed; adjust once a real one is seen.
 NOT_FOUND_KEYWORDS = [
     kw.strip() for kw in os.environ.get(
         "NOT_FOUND_KEYWORDS",
@@ -64,10 +52,11 @@ NOT_FOUND_KEYWORDS = [
     if kw.strip()
 ]
 
-OUTCOME_ACCEPTED = "accepted"    # backend returned 2xx, no "not found" phrase matched
-OUTCOME_REJECTED = "rejected"    # backend returned non-2xx, no "not found" phrase matched
-OUTCOME_NOT_FOUND = "not_found"  # response matched a "not found" phrase — final, not retried
-OUTCOME_ERROR = "error"          # token acquisition or the HTTP request itself failed — retryable
+# Only "error" is retried; the rest are final.
+OUTCOME_ACCEPTED = "accepted"    # backend 2xx
+OUTCOME_REJECTED = "rejected"    # backend non-2xx
+OUTCOME_NOT_FOUND = "not_found"  # matched a "not found" phrase
+OUTCOME_ERROR = "error"          # token acquisition or HTTP request itself failed
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 RUN_STAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -156,10 +145,7 @@ def step2_verify_with_backend(token: str, tax_code: str, lookup_code: str):
 
 
 def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
-    """Run one test case. Returns OUTCOME_ACCEPTED / OUTCOME_REJECTED /
-    OUTCOME_NOT_FOUND / OUTCOME_ERROR. Only OUTCOME_ERROR is retryable —
-    the other three are all valid final answers from the site, not bugs.
-    """
+    """Run one test case. Returns accepted / rejected / not_found / error."""
     logger.info("\n--- Run %s (tax_code=%s, lookup_code=%s) ---", run_label, tax_code, lookup_code)
     t0 = time.time()
 
@@ -171,9 +157,8 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
         return OUTCOME_ERROR
 
     if not VERIFY_ENDPOINT:
-        logger.info("VERIFY_ENDPOINT not set — skipping backend acceptance check.")
-        logger.info("(Token acquisition alone does not mean your server accepts it.)")
-        return OUTCOME_ACCEPTED  # nothing left to check; don't retry just because it's unset
+        logger.info("VERIFY_ENDPOINT not set — skipping backend check (got a token only).")
+        return OUTCOME_ACCEPTED  # nothing left to check
 
     try:
         resp = step2_verify_with_backend(token, tax_code, lookup_code)
@@ -187,11 +172,8 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
     matched_keyword = next((kw for kw in NOT_FOUND_KEYWORDS if kw.lower() in lowered), None)
 
     if matched_keyword:
-        logger.warning(
-            "Run %s RESULT: NOT FOUND — response matched \"%s\" (%ss). "
-            "Treated as a valid final outcome, not a test failure — not retried.",
-            run_label, matched_keyword, elapsed,
-        )
+        logger.warning("Run %s RESULT: NOT FOUND — matched \"%s\" (%ss). Final, not retried.",
+                       run_label, matched_keyword, elapsed)
         return OUTCOME_NOT_FOUND
 
     accepted = 200 <= resp.status_code < 300
@@ -204,10 +186,7 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
 
 
 def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> str:
-    """Retry a test case up to MAX_ATTEMPTS times, but ONLY on OUTCOME_ERROR.
-    OUTCOME_ACCEPTED / OUTCOME_REJECTED / OUTCOME_NOT_FOUND are all final —
-    they're real answers from the site, not something to retry away.
-    """
+    """Retry a case up to MAX_ATTEMPTS times, but only on a technical error."""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         attempt_label = f"{run_label} (attempt {attempt}/{MAX_ATTEMPTS})"
         outcome = run_once(attempt_label, tax_code, lookup_code)

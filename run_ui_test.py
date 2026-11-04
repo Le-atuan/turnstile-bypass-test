@@ -1,72 +1,19 @@
 #!/usr/bin/env python3
 """
-UI-level bot-detection test — ezsolver branch
--------------------------------------------------
-Goal: answer "does tracuu.einvoice365.com detect a bot that fills in the
-REAL lookup form and clicks the REAL submit button, typing like a human?"
-— a different, more realistic question than run_test.py's (which only
-tests whether a token can be obtained and whether a raw HTTP POST to a
-guessed endpoint is accepted).
+UI bot-detection test (ezsolver branch).
 
-IMPORTANT — why this is a separate script from run_test.py:
-EzSolver's own `solve_on_page()` (used by run_test.py) runs
-`document.body.innerHTML = ''` as its very first step, which WIPES the
-real page's DOM — including the real "Mã số thuế" / "Mã tra cứu" inputs —
-before injecting its own isolated widget. That makes it unsuitable for a
-test that needs the real form to still exist. This script never calls
-that function. It only reuses EzSolver's browser-launch helpers
-(`start_browser`, `_find_chrome`, `_start_xvfb_if_needed`) and otherwise:
+Drives the real page like a user would: waits for Turnstile, fills the
+real form, clicks "Tra cứu", reads the result — to see if the site
+detects a bot operating its UI. Runs once per TEST_CASES entry.
 
-  1. Loads the real page completely unmodified — nothing injected, nothing
-     wiped.
-  2. Waits for the page's OWN Turnstile widget (managed/invisible mode —
-     it auto-renders and resolves with no click needed, confirmed during
-     recon) to produce a token in the background, by polling the real
-     hidden `cf-turnstile-response` input the page's own JS already
-     manages.
-  3. Types the tax code and lookup code for ONE real test case into the
-     real form fields (located by their placeholder text, confirmed from
-     a screenshot of the real page), with randomized per-character delay
-     to avoid an instant/robotic fill pattern. Repeats once per entry in
-     TEST_CASES — a different real invoice each run.
-  4. Clicks the real "Tra cứu" button — via Webix's stable view-id
-     (search:btnsearch) and a real coordinate-based mouse click, not a
-     plain CSS selector or a synthetic .click(). Recon confirmed the UI
-     is built with Webix (buttons are <div>s, not <button>s, with
-     internal DOM ids that change every page load) and that a sibling
-     button (search:btnxml, "Tải XML") has NO bound click handler at all
-     — so a real mouse click at the button's actual coordinates is the
-     technique proven to work, matching how recon's own manual test
-     succeeded.
-  5. Polls the result banner (Webix view search:status) until it becomes
-     visible — recon observed this can take 5-8s, not the ~3s this
-     script originally assumed — then reads its text (falling back to
-     the page body if that lookup fails for any reason) so you can see
-     whether the lookup succeeded, failed, or the page reacted as if it
-     detected automation.
-  6. If the "Tải XML" button (search:btnxml) is visible after the
-     lookup, clicks it too (best-effort, never affects the run's
-     success/failure outcome) and reports whether a new tab or file blob
-     resulted — see maybe_click_download_xml(). Recon's manual test
-     found no click handler bound on this button at all; this step gives
-     you a fresh, scripted data point on that each time you run it.
+Unlike run_test.py, this never calls EzSolver's solve_on_page() (which
+wipes the real DOM) — it only reuses EzSolver's browser-launch helpers.
+Logs go to logs/ui_test_<timestamp>.log; failures also save a
+screenshot + HTML there.
 
-PARTIALLY VALIDATED AGAINST REAL RECON (2 live lookups performed
-manually, one succeeded end-to-end), but this script itself has NOT been
-executed end-to-end in this session: this cloud sandbox has no real
-Chrome and no network path to the target. nodriver's exact method names
-(`page.select`, `element.send_keys`, `page.mouse_move`/`mouse_click`) are
-written per its documented API but should be verified against the
-installed nodriver version on your machine.
-
-LOGGING: every run writes a timestamped log file under logs/ (full
-detail, including tracebacks) in addition to concise console output. On
-any step failure, this script also tries to save a screenshot and the
-page's HTML into logs/ for offline debugging — see the "Logging &
-troubleshooting" section in README.md for exactly what gets written and
-where, and what to do with it.
-
-Only run this against infrastructure you own, with explicit authorization.
+Only run against infrastructure you own or are authorized to test.
+Not yet run end-to-end here (no real Chrome / no network to target) —
+verify nodriver method names on first local run.
 """
 import asyncio
 import json
@@ -92,22 +39,11 @@ from solver import _find_chrome, _get_profile_dir, _start_xvfb_if_needed, start_
 SITEURL = os.environ.get("TARGET_SITEURL", "https://tracuu.einvoice365.com/").strip()
 TEST_CASES = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
 TOKEN_WAIT_TIMEOUT = int(os.environ.get("TOKEN_WAIT_TIMEOUT", "20"))
-# Recon observed the result banner (Webix view "search:status") can take
-# 5-8s to appear after clicking "Tra cứu" — not instant. Poll instead of a
-# fixed sleep, up to this many seconds.
 RESULT_WAIT_TIMEOUT = int(os.environ.get("RESULT_WAIT_TIMEOUT", "20"))
-MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries per test case, TECHNICAL failures only
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
 
-# Phrases that mean "the site answered normally — it just has no record for
-# this tax_code/lookup_code pair." This is a successful, expected outcome,
-# NOT a bug, so it must never trigger a retry — only a genuine step failure
-# (crash, timeout, selector not found, etc.) should retry.
-#
-# GUESS, NOT CONFIRMED: these are plausible Vietnamese e-invoice lookup
-# phrases, not copied from an actual observed response (no test run has hit
-# a real "not found" case yet). Check the real wording the first time this
-# happens — look at the logged page content / saved HTML — and adjust
-# NOT_FOUND_KEYWORDS in .env if it doesn't match.
+# Phrases meaning "no record found" — a valid result, never retried.
+# Guessed; adjust once a real "not found" response is seen.
 NOT_FOUND_KEYWORDS = [
     kw.strip() for kw in os.environ.get(
         "NOT_FOUND_KEYWORDS",
@@ -116,22 +52,16 @@ NOT_FOUND_KEYWORDS = [
     if kw.strip()
 ]
 
-# Outcome labels returned by run_once() / run_with_retries().
-OUTCOME_SUCCESS = "success"      # page responded, no "not found" phrase matched
-OUTCOME_NOT_FOUND = "not_found"  # page responded with a "not found" phrase — final, not retried
-OUTCOME_ERROR = "error"          # a step crashed/timed out — retryable
+# Only "error" is retried; the other two are final.
+OUTCOME_SUCCESS = "success"
+OUTCOME_NOT_FOUND = "not_found"
+OUTCOME_ERROR = "error"
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 RUN_STAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 LOG_FILE = os.path.join(LOG_DIR, f"ui_test_{RUN_STAMP}.log")
 
-
-# --- Logging setup --------------------------------------------------------
-# Console: concise (INFO and up, no timestamps — matches the previous
-#   print()-based output so it stays easy to read live).
-# File (logs/ui_test_<timestamp>.log): full detail (DEBUG and up, with
-#   timestamps, module, and level) — this is what you attach when
-#   reporting an error, since it has the full traceback for any failure.
+# Console: concise (INFO). File: full detail + tracebacks (DEBUG).
 os.makedirs(LOG_DIR, exist_ok=True)
 
 logger = logging.getLogger("ui_test")
@@ -152,7 +82,7 @@ logger.addHandler(file_handler)
 
 
 def log_environment():
-    """Record enough context in the log file to debug a failure without re-asking the user."""
+    """Log Python/platform/nodriver/Chrome context for debugging."""
     logger.debug("=== Environment ===")
     logger.debug("Python: %s", sys.version.replace("\n", " "))
     logger.debug("Platform: %s", platform.platform())
@@ -177,11 +107,8 @@ def log_environment():
 def require_own_site_ack():
     logger.info("=" * 70)
     logger.info("This will drive a real browser to fill the REAL form on:\n    %s", SITEURL)
-    logger.info(
-        "It will run %s test case(s), one distinct real tax_code/lookup_code pair each, "
-        "retrying up to %s time(s) per case on failure.",
-        len(TEST_CASES), MAX_ATTEMPTS,
-    )
+    logger.info("Running %s test case(s), retrying up to %s time(s) each on technical failure.",
+                len(TEST_CASES), MAX_ATTEMPTS)
     logger.info("Only run this against a site you own or are authorized to test.")
     logger.info("=" * 70)
     ans = input("Confirm you are authorized to test this target [y/N]: ").strip().lower()
@@ -192,18 +119,14 @@ def require_own_site_ack():
 
 
 async def human_type(element, text: str):
-    """Type one character at a time with a randomized delay, like a real user."""
+    """Type one char at a time with a random delay, like a real user."""
     for ch in text:
         await element.send_keys(ch)
         await asyncio.sleep(random.uniform(0.05, 0.18))
 
 
 async def wait_for_token(page, timeout: int) -> bool:
-    """Poll the page's own hidden Turnstile input until it has a value.
-
-    Deliberately does NOT inject or call turnstile.render() — the real
-    page's own script already renders it in managed/invisible mode.
-    """
+    """Poll the page's own hidden Turnstile input until it has a value."""
     deadline = time.time() + timeout
     poll_count = 0
     while time.time() < deadline:
@@ -220,22 +143,12 @@ async def wait_for_token(page, timeout: int) -> bool:
 
 
 async def click_submit_button(page):
-    """Click the real 'Tra cứu' button via Webix's stable view-id
-    (search:btnsearch) and a REAL coordinate-based mouse click, not a
-    synthetic .click() call.
+    """Click the real "Tra cứu" button.
 
-    Why not page.find("Tra cứu").click() or a plain CSS selector: recon
-    confirmed the UI is built with Webix — "Tra cứu" is rendered as
-    <div class="webix_view webix_control webix_el_button ...">, not a
-    plain <button>, and Webix assigns each view a STABLE internal view-id
-    (survives page reloads) queryable via `webix.$$('<view-id>')`, unlike
-    the DOM's own numeric ids which are randomized per load. Recon also
-    found the sibling "Tải XML" button (search:btnxml) has NO bound click
-    handler at all when inspected directly — so this app's Webix buttons
-    are not guaranteed to respond to a programmatic .click(). A real
-    mouse-move-then-click at the button's actual screen coordinates (the
-    same technique EzSolver itself uses for the Turnstile iframe) is the
-    one proven to work, since recon's own manual test succeeded this way.
+    The UI is Webix: buttons are <div>s with randomized DOM ids but a
+    stable view-id (search:btnsearch). We locate it via webix.$$() and
+    click its real screen coordinates, since synthetic .click() is
+    unreliable here (a sibling button has no handler bound).
     """
     rect = await page.evaluate("""
         (() => {
@@ -250,9 +163,8 @@ async def click_submit_button(page):
     """)
     if not rect:
         raise RuntimeError(
-            "Could not locate search:btnsearch via webix.$$() — the Webix "
-            "API may not be loaded yet, the view-id may have changed, or "
-            "the button isn't rendered/visible. Check the saved HTML."
+            "Could not locate search:btnsearch via webix.$$() — Webix may "
+            "not be loaded, the view-id changed, or the button isn't visible."
         )
 
     cx = rect["x"] + rect["w"] / 2 + random.uniform(-3, 3)
@@ -265,22 +177,10 @@ async def click_submit_button(page):
 
 
 async def maybe_click_download_xml(page, run_label: str):
-    """Best-effort: if the 'Tải XML' button (search:btnxml) is visible
-    after a lookup, click it via the same Webix view-id + real mouse
-    click technique as the submit button.
-
-    Recon's manual test found this button has NO click handler bound at
-    all (no network request, no download, no console output resulted) —
-    so this click is expected, based on that earlier check, to do
-    nothing observable. It's attempted anyway on request, with a small
-    probe hooked into window.open()/URL.createObjectURL() just before
-    clicking, so each run reports a fresh, scripted data point instead of
-    relying solely on the earlier manual observation.
-
-    This NEVER affects the run's outcome (success/not_found/error) — any
-    failure here is caught and logged as a warning only, since it's
-    purely informational and secondary to the actual Turnstile/lookup
-    test.
+    """If the "Tải XML" button is visible, click it and report whether a
+    new tab/blob resulted. Informational only — never affects the outcome,
+    and any error here is logged as a warning. (Recon found no handler
+    bound on this button, so a click likely does nothing.)
     """
     try:
         visible = await page.evaluate("""
@@ -298,10 +198,7 @@ async def maybe_click_download_xml(page, run_label: str):
         logger.debug("Run %s: 'Tải XML' button not visible — nothing to click.", run_label)
         return
 
-    logger.info(
-        "Run %s: 'Tải XML' button is visible — clicking it (best-effort; "
-        "recon found no handler bound as of the last manual check)...", run_label
-    )
+    logger.info("Run %s: 'Tải XML' visible — clicking it (best-effort)...", run_label)
 
     try:
         rect = await page.evaluate("""
@@ -315,15 +212,10 @@ async def maybe_click_download_xml(page, run_label: str):
             })()
         """)
         if not rect:
-            logger.warning(
-                "Run %s: 'Tải XML' button reported visible but its bounding "
-                "rect could not be read — skipping the click.", run_label
-            )
+            logger.warning("Run %s: 'Tải XML' visible but its rect couldn't be read — skipping.", run_label)
             return
 
-        # Hook window.open()/URL.createObjectURL() right before clicking, so
-        # we can report whether THIS click produced a new tab or blob —
-        # matches what recon checked manually.
+        # Hook window.open/createObjectURL to detect if THIS click does anything.
         await page.evaluate("""
             (() => {
                 window.__xmlClickProbe = {opened: false, blobUrl: null};
@@ -351,30 +243,21 @@ async def maybe_click_download_xml(page, run_label: str):
         await asyncio.sleep(random.uniform(0.08, 0.2))
         await page.mouse_click(cx, cy)
 
-        await asyncio.sleep(2)  # give any resulting navigation/download a moment
+        await asyncio.sleep(2)  # let any download/navigation happen
 
         probe = await page.evaluate("window.__xmlClickProbe || {}")
-        logger.info(
-            "Run %s: 'Tải XML' click result — window.open() called: %s, new "
-            "blob URL created: %s. If both are false, this matches recon's "
-            "earlier finding that the button has no bound handler. (A blob "
-            "URL belonging to the PDF viewer from an EARLIER step would not "
-            "show up here — only a blob created by THIS click is hooked.)",
-            run_label, probe.get("opened"), bool(probe.get("blobUrl")),
-        )
+        logger.info("Run %s: 'Tải XML' click — opened new tab: %s, new blob: %s",
+                    run_label, probe.get("opened"), bool(probe.get("blobUrl")))
         if probe.get("blobUrl"):
-            logger.debug("Run %s: new blob URL from 'Tải XML' click: %s", run_label, probe.get("blobUrl"))
+            logger.debug("Run %s: new blob URL: %s", run_label, probe.get("blobUrl"))
     except Exception as exc:
-        logger.warning("Run %s: error while clicking 'Tải XML' (non-fatal, doesn't affect test result): %s", run_label, exc)
+        logger.warning("Run %s: error clicking 'Tải XML' (non-fatal): %s", run_label, exc)
         logger.debug("Traceback:\n%s", traceback.format_exc())
 
 
 async def wait_for_result(page, timeout: int) -> bool:
-    """Poll Webix's result-status view (search:status) until it becomes
-    visible. Recon confirmed this banner (not just any DOM change) is
-    what actually signals a completed lookup — e.g. "Hóa đơn có hiệu lực"
-    for a valid invoice — and that it can take 5-8s to appear, not just
-    the ~3s this script originally assumed.
+    """Poll the Webix result banner (search:status) until visible.
+    This can take 5-8s, so we poll rather than sleep a fixed amount.
     """
     deadline = time.time() + timeout
     poll_count = 0
@@ -391,16 +274,12 @@ async def wait_for_result(page, timeout: int) -> bool:
             logger.debug("search:status became visible after %d poll(s)", poll_count)
             return True
         await asyncio.sleep(0.5)
-    logger.debug("search:status never became visible after %d poll(s) / %ds", poll_count, timeout)
+    logger.debug("search:status never visible after %d poll(s) / %ds", poll_count, timeout)
     return False
 
 
 async def read_result_text(page) -> str:
-    """Read the result banner's own text if available (precise — this is
-    exactly the "Hóa đơn có hiệu lực" / error message Webix renders),
-    falling back to a slice of the whole page body if the banner lookup
-    itself fails for any reason.
-    """
+    """Return the result banner's text, falling back to the page body."""
     try:
         status_text = await page.evaluate("""
             (() => {
@@ -419,18 +298,13 @@ async def read_result_text(page) -> str:
 
 
 async def dump_failure_artifacts(page, run_label: str, step: str):
-    """Best-effort capture of a screenshot + page HTML on failure, for offline debugging.
-
-    Wrapped in its own try/except per artifact: a failure saving one artifact
-    must never hide the original error or crash the run.
-    """
+    """Best-effort screenshot + page HTML on failure. Never crashes the run."""
     safe_label = run_label.replace("/", "-")
     base = os.path.join(LOG_DIR, f"failure_{RUN_STAMP}_run{safe_label}_{step}")
 
     try:
         screenshot_path = base + ".png"
-        # nodriver's screenshot method name has varied across versions
-        # (save_screenshot / screenshot). Try both; log whichever worked.
+        # Method name varies across nodriver versions.
         if hasattr(page, "save_screenshot"):
             await page.save_screenshot(screenshot_path)
         elif hasattr(page, "screenshot"):
@@ -452,13 +326,8 @@ async def dump_failure_artifacts(page, run_label: str, step: str):
 
 
 async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
-    """Run one lookup attempt. Returns one of OUTCOME_SUCCESS / OUTCOME_NOT_FOUND
-    / OUTCOME_ERROR.
-
-    Every step is wrapped individually so the log file shows exactly which
-    step failed and why, with a full traceback. OUTCOME_ERROR is the only
-    retryable outcome — OUTCOME_NOT_FOUND means the site answered normally
-    with "no such invoice," which is a valid final result, not a bug.
+    """Run one lookup attempt. Returns success / not_found / error.
+    Each step is wrapped so the log shows exactly which one failed.
     """
     logger.info("\n--- Run %s (tax_code=%s, lookup_code=%s) ---", run_label, tax_code, lookup_code)
     t0 = time.time()
@@ -480,7 +349,7 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             logger.debug("Traceback:\n%s", traceback.format_exc())
             return OUTCOME_ERROR
 
-        logger.info("Waiting for the page's own Turnstile widget to resolve in the background...")
+        logger.info("Waiting for Turnstile to resolve in the background...")
         try:
             got_token = await wait_for_token(page, timeout=TOKEN_WAIT_TIMEOUT)
         except Exception:
@@ -490,26 +359,20 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             return OUTCOME_ERROR
 
         if not got_token:
-            logger.warning(
-                "Run %s RESULT: no token appeared within %ds — the widget itself "
-                "may be flagging this browser session.", run_label, TOKEN_WAIT_TIMEOUT
-            )
+            logger.warning("Run %s: no token within %ds — the widget may be flagging this session.",
+                           run_label, TOKEN_WAIT_TIMEOUT)
             await dump_failure_artifacts(page, run_label, "no_token")
             return OUTCOME_ERROR
 
-        logger.info("Token ready. Filling the real form like a human would...")
+        logger.info("Token ready. Filling the real form...")
         try:
             tax_input = await page.select('input[placeholder="MST bên bán"]')
             await tax_input.click()
             await human_type(tax_input, tax_code)
             await asyncio.sleep(random.uniform(0.3, 0.9))
         except Exception:
-            logger.error(
-                "Run %s: FAILED to fill the MST field — selector "
-                "'input[placeholder=\"MST bên bán\"]' may not match the live page "
-                "(placeholder text or markup may have changed). Check the saved "
-                "HTML snapshot.", run_label
-            )
+            logger.error("Run %s: FAILED to fill the MST field (selector may not match). "
+                         "Check the saved HTML.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "fill_mst_error")
             return OUTCOME_ERROR
@@ -520,11 +383,8 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             await human_type(lookup_input, lookup_code)
             await asyncio.sleep(random.uniform(0.3, 0.9))
         except Exception:
-            logger.error(
-                "Run %s: FAILED to fill the lookup-code field — selector "
-                "'input[placeholder=\"Mã tra cứu hóa đơn\"]' may not match the "
-                "live page. Check the saved HTML snapshot.", run_label
-            )
+            logger.error("Run %s: FAILED to fill the lookup-code field (selector may not match). "
+                         "Check the saved HTML.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "fill_lookup_error")
             return OUTCOME_ERROR
@@ -532,15 +392,12 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
         try:
             await click_submit_button(page)
         except Exception:
-            logger.error(
-                "Run %s: FAILED to find/click the 'Tra cứu' button.", run_label
-            )
+            logger.error("Run %s: FAILED to click the 'Tra cứu' button.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "click_submit_error")
             return OUTCOME_ERROR
 
-        logger.info("Submitted. Waiting for the result banner (search:status) to appear "
-                    "(up to %ds — recon observed this can take 5-8s)...", RESULT_WAIT_TIMEOUT)
+        logger.info("Submitted. Waiting for the result banner (up to %ds)...", RESULT_WAIT_TIMEOUT)
         try:
             got_result = await wait_for_result(page, timeout=RESULT_WAIT_TIMEOUT)
         except Exception:
@@ -550,20 +407,15 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             return OUTCOME_ERROR
 
         if not got_result:
-            logger.warning(
-                "Run %s RESULT: no result banner appeared within %ds after "
-                "clicking 'Tra cứu'. Recon could not determine whether this means "
-                "'no match for this data' or 'the click didn't register' — treated "
-                "as a technical error so it gets retried with a fresh browser.",
-                run_label, RESULT_WAIT_TIMEOUT,
-            )
+            logger.warning("Run %s: no result banner within %ds — treated as a retryable error "
+                           "(could be 'no match' or an unregistered click).", run_label, RESULT_WAIT_TIMEOUT)
             await dump_failure_artifacts(page, run_label, "no_result")
             return OUTCOME_ERROR
 
         try:
             body_text = await read_result_text(page)
         except Exception:
-            logger.error("Run %s: FAILED to read the page's response content.", run_label)
+            logger.error("Run %s: FAILED to read the result content.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "read_result_error")
             return OUTCOME_ERROR
@@ -578,21 +430,16 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
         matched_keyword = next((kw for kw in NOT_FOUND_KEYWORDS if kw.lower() in lowered), None)
 
         if matched_keyword:
-            logger.warning(
-                "Run %s RESULT: NOT FOUND — page response matched \"%s\" (%ss). "
-                "Treated as a valid final outcome, not a test failure — not retried.",
-                run_label, matched_keyword, elapsed,
-            )
+            logger.warning("Run %s RESULT: NOT FOUND — matched \"%s\" (%ss). Final, not retried.",
+                           run_label, matched_keyword, elapsed)
             return OUTCOME_NOT_FOUND
 
-        logger.info("Run %s RESULT: SUCCESS — page responded with no known "
-                    "'not found' phrase, in %ss.", run_label, elapsed)
+        logger.info("Run %s RESULT: SUCCESS — no 'not found' phrase, in %ss.", run_label, elapsed)
         return OUTCOME_SUCCESS
 
     except Exception:
-        # Catch-all safety net: anything not already caught above still gets
-        # logged with a full traceback instead of crashing the whole script.
-        logger.error("Run %s: UNEXPECTED error outside the normal step handling.", run_label)
+        # Safety net: log anything uncaught instead of crashing.
+        logger.error("Run %s: UNEXPECTED error.", run_label)
         logger.debug("Traceback:\n%s", traceback.format_exc())
         if page is not None:
             await dump_failure_artifacts(page, run_label, "unexpected_error")
@@ -607,36 +454,24 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
 
 
 async def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> str:
-    """Run one test case, retrying up to MAX_ATTEMPTS times — but ONLY on
-    OUTCOME_ERROR (a technical/step failure). OUTCOME_SUCCESS and
-    OUTCOME_NOT_FOUND are both final results and return immediately,
-    without any retry: "not found" is a legitimate answer from the site,
-    not something to retry away.
-
-    Each attempt opens a fresh browser (run_once's own finally block closes
-    it), so a retry starts clean rather than reusing a possibly-broken
-    session. A short randomized backoff separates attempts so retries don't
-    hammer the site back-to-back.
+    """Retry a case up to MAX_ATTEMPTS times, but only on a technical error.
+    Each attempt uses a fresh browser, with a small backoff between tries.
     """
     for attempt in range(1, MAX_ATTEMPTS + 1):
         attempt_label = f"{run_label} (attempt {attempt}/{MAX_ATTEMPTS})"
         outcome = await run_once(attempt_label, tax_code, lookup_code)
 
         if outcome != OUTCOME_ERROR:
-            return outcome  # success or not_found — final, no retry
+            return outcome  # success or not_found — final
 
         if attempt < MAX_ATTEMPTS:
             backoff = random.uniform(2, 5) * attempt
-            logger.warning(
-                "Run %s: technical error — retrying in %.1fs (attempt %d/%d)...",
-                run_label, backoff, attempt + 1, MAX_ATTEMPTS,
-            )
+            logger.warning("Run %s: technical error — retrying in %.1fs (attempt %d/%d)...",
+                           run_label, backoff, attempt + 1, MAX_ATTEMPTS)
             await asyncio.sleep(backoff)
         else:
-            logger.error(
-                "Run %s: all %d attempt(s) failed with technical errors. "
-                "See the log file for details.", run_label, MAX_ATTEMPTS,
-            )
+            logger.error("Run %s: all %d attempt(s) failed. See the log for details.",
+                         run_label, MAX_ATTEMPTS)
 
     return OUTCOME_ERROR
 
@@ -646,10 +481,8 @@ async def main():
     log_environment()
 
     if not TEST_CASES:
-        logger.error(
-            "Set TEST_CASES in .env first (see .env.example) — a JSON list of "
-            '{"tax_code": "...", "lookup_code": "..."} objects, one per run.'
-        )
+        logger.error('Set TEST_CASES in .env first — a JSON list of '
+                     '{"tax_code": "...", "lookup_code": "..."} objects.')
         sys.exit(1)
 
     require_own_site_ack()
@@ -663,11 +496,8 @@ async def main():
                 tax_code = case["tax_code"]
                 lookup_code = case["lookup_code"]
             except (KeyError, TypeError):
-                logger.error(
-                    "TEST_CASES entry %d is malformed (expected keys 'tax_code' "
-                    "and 'lookup_code'): %r", i, case
-                )
-                results.append(False)
+                logger.error("TEST_CASES entry %d is malformed: %r", i, case)
+                results.append(OUTCOME_ERROR)
                 continue
 
             outcome = await run_with_retries(f"{i}/{total}", tax_code, lookup_code)
@@ -682,19 +512,11 @@ async def main():
     not_found = results.count(OUTCOME_NOT_FOUND)
     errored = results.count(OUTCOME_ERROR)
     logger.info("\n" + "=" * 70)
-    logger.info(
-        "SUMMARY: %d/%d found | %d/%d not found (valid result) | %d/%d technical error",
-        succeeded, len(results), not_found, len(results), errored, len(results),
-    )
+    logger.info("SUMMARY: %d found | %d not found | %d technical error (of %d)",
+                succeeded, not_found, errored, len(results))
     if errored:
-        logger.info(
-            "Technical errors occurred even after retries — see this run's full "
-            "log for tracebacks and the exact step that failed:\n    %s", LOG_FILE
-        )
-        logger.info(
-            "Any saved screenshots/HTML snapshots for failed steps are in:\n    %s",
-            LOG_DIR,
-        )
+        logger.info("See the full log for tracebacks: %s", LOG_FILE)
+        logger.info("Saved screenshots/HTML (if any): %s", LOG_DIR)
     logger.info("=" * 70)
 
 
