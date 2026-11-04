@@ -1,120 +1,101 @@
-# Turnstile defensive test harness
+*English | [Tiếng Việt](README.vi.md)*
 
-Tests whether an off-the-shelf browser-automation solver can obtain a
-Cloudflare Turnstile token for **your own site**, and whether your backend
-accepts that token. Built to evaluate `tracuu.einvoice365.com` (FPT
-eInvoice lookup portal) — only point it at infrastructure you own or are
-authorized to test.
+# ezsolver branch — technical detail
 
-## Target site findings (from direct observation, 2026-11-04)
+Integrates [`ismoiloffS/EzSolver`](https://github.com/ismoiloffS/EzSolver)
+(MIT) against our own `tracuu.einvoice365.com` lookup page. See the
+[`main` branch](../../tree/main) README for the project overview and the
+comparison against the `Turnstile-Solver` branch. This file goes deeper
+into how EzSolver itself works internally and what that means for reading
+the test result correctly.
 
-- **Widget:** Cloudflare Turnstile, **managed/invisible mode** — no
-  checkbox or puzzle is shown; it resolves in the background in ~1-2s.
-  The "Tra cứu" (lookup) button stays disabled until the token is ready.
-- **Site key:** `0x4AAAAAACA6lZiDGKBtjbxg` (from `window.TURNSTILE_SITE_KEY`).
-- **Token field:** hidden input `name="cf-turnstile-response"`.
-- **Candidate lookup endpoints** seen in `portal.js` (exact request shape
-  not yet confirmed — verify with DevTools before using):
-  `/ptop/psearch`, `/ptopnew/psearch`, `/ptopnew/pcussearch`,
-  `/api/inv/minutes/param`.
-- **No other bot defense observed:** no reCAPTCHA/hCaptcha/image captcha,
-  no full-page Cloudflare interstitial — Turnstile is the only visible
-  layer on this page.
-- `robots.txt` returns an Internal Server Error (not a valid robots.txt).
-- No public terms-of-use or API documentation found on this subdomain;
-  only a support hotline/email and a link to the parent company fpt-is.com.
+For install/run commands, see [`SETUP.md`](SETUP.md) /
+[`SETUP.vi.md`](SETUP.vi.md).
 
-**Implication:** because the widget is invisible/managed and auto-resolves
-with no interaction, a solver only needs to load the page and wait for the
-callback — it doesn't need to simulate a checkbox click at all. This is
-*easier* for a solver than a visible "I'm not a robot" challenge would be.
-Whatever stops abuse here has to come from elsewhere: your backend's
-replay/rate-limit/anomaly logic, not the widget's interaction mode.
+## How EzSolver obtains a token — code walkthrough
 
-## Why this exists
+EzSolver ships two entry points that share the same core logic in
+`EzSolver/solver.py`:
 
-Turnstile tokens prove "a real browser executed the widget," nothing more.
-Any tool that drives a real browser (EzSolver, and similarly-shaped tools
-like Theyka/Turnstile-Solver or odell0111/turnstile_solver) can obtain a
-valid token for a page it's pointed at. The real question for a site owner
-isn't "can some tool get a token" — it almost always can — it's **"does my
-backend still have a layer of defense after the token is accepted?"** This
-harness measures exactly that, end to end.
+- `solver.py` — standalone CLI, opens a fresh Chrome per run.
+- `service.py` — keeps one Chrome instance alive across requests via a
+  tiny built-in HTTP server (`POST /solve`), to cut cold-start cost.
 
-## What's included
+Our `run_test.py` calls `solver.solve()` directly (no HTTP hop needed for
+a single test). The sequence inside `solve_on_page()`:
 
-- `EzSolver/` — upstream solver (MIT license), vendored as a git checkout.
-  Drives a real Chrome via `nodriver`, waits for the Turnstile widget's
-  callback, and returns the token. Chosen first because its README
-  explicitly scopes itself to "pages you own or are authorized to test,"
-  it's the simplest of the candidates, and it has no paid API dependency.
-- `run_test.py` — the harness:
-  1. Prompts you to confirm authorization before touching the target.
-  2. Calls EzSolver to obtain a token for your configured sitekey/URL.
-  3. Optionally submits that token to your real backend endpoint and
-     reports whether it was accepted or rejected.
-- `.env.example` — fill in your real sitekey, target URL, and (optionally)
-  the backend endpoint that consumes the token.
+1. **Navigate to the real target URL** — `await page.get(siteurl)`. Unlike
+   the `Turnstile-Solver` branch, EzSolver does **not** intercept or
+   replace the page response. Our actual HTML, CSS, and JS all load and
+   run exactly as a normal visitor's browser would run them.
+2. **Hook `Element.prototype.attachShadow`** before Turnstile's own script
+   runs, forcing every shadow root Cloudflare creates to be `mode: 'open'`
+   instead of `'closed'`. Turnstile renders its iframe inside a closed
+   shadow DOM specifically so page scripts can't easily reach into it;
+   this hook defeats that isolation so the automation script can read the
+   iframe's position and the widget's internal state.
+3. **Inject and explicitly render the widget** into a small fixed-position
+   div (`#_ts_box`), using `turnstile.render()` with our real `sitekey`,
+   rather than relying on the page's own auto-render. The `callback` and
+   `error-callback` options store the result on `window._tsToken` /
+   `window._tsError` so the Python side can poll for it.
+4. **Poll for state** every 0.5s via `page.evaluate()`, checking (in
+   order) the error callback, the token callback, and the hidden
+   `cf-turnstile-response` input's value as a fallback.
+5. **If no token or error appears after ~5s**, locate the Cloudflare
+   iframe's on-screen rectangle (through the opened shadow root, falling
+   back to a plain `<iframe src*="challenges.cloudflare.com">` search) and
+   **simulate a human-like click**: move the mouse in two steps with
+   randomized jitter (`random.uniform(-3, 3)` on each coordinate,
+   staggered `sleep`s between move/click), then click. This only matters
+   for a *visible* checkbox widget — on this target, the widget is
+   managed/invisible and should resolve from step 4 alone, without ever
+   reaching the click logic.
+6. **Error codes are mapped to human-readable reasons** (`110100` invalid
+   sitekey, `110200` domain not authorized, `110600` challenge timeout,
+   etc.) — useful for distinguishing "Turnstile actively rejected this
+   browser" from "it just timed out."
 
-## Requirements (must run where these are available)
+## What a result actually tells us, given this mechanism
 
-- Python 3.8+
-- **Real Google Chrome** installed (not just headless Chromium —
-  `nodriver` talks to Chrome's DevTools protocol and the README recommends
-  the real Chrome build)
-- Linux without a display: `sudo apt install xvfb`
-- Outbound network access to your target site and to
-  `challenges.cloudflare.com`
+- **Because step 1 loads our real page unmodified**, a successful token
+  here means: *a scripted browser, with no human present, running our
+  actual page's real JS, was able to get Turnstile to approve it.* This is
+  as close as an automated test gets to "what would happen if a bot
+  pointed a browser at our real lookup page right now."
+- **The shadow-DOM hook (step 2) is a meaningful technique to be aware
+  of**, independent of this specific tool: `closed` shadow roots are not a
+  security boundary against a browser the automation itself controls,
+  since CDP/Playwright-level access can always override `attachShadow`
+  before any other script runs. Don't rely on shadow DOM encapsulation as
+  a bot-defense mechanism — it only raises the bar for people copying someone else's JS tricks without controlling the browser itself, not for anyone driving the browser directly, which is exactly the situation any solver tool represents.
+- **The explicit `turnstile.render()` call with our real sitekey means
+  domain-binding is exercised exactly as it would be for a real visitor**
+  — this isn't a synthetic/foreign-page test like the `Turnstile-Solver`
+  branch's technique.
+- A **failure** here, given managed/invisible mode doesn't require a
+  click, would suggest Cloudflare's risk scoring itself flagged the
+  automated browser (headless fingerprint, missing real user signals,
+  etc.) rather than any click-simulation timing issue — worth noting
+  before concluding our own backend/widget config is responsible for a
+  block.
 
-This cloud session cannot run the live test itself: this container has no
-real Chrome (only a headless-automation Chromium) and its network policy
-does not currently allow `tracuu.einvoice365.com` to resolve. Run this
-project on your own machine (or a VM you control), e.g. via
-`claude remote-control` or just `git clone`-ing this folder and running it
-locally where you have Chrome and network access to your own site.
+## Requirements specific to this solver
 
-## Setup
+- **Real Google Chrome**, not just a headless-automation Chromium build —
+  `nodriver` drives it over the DevTools Protocol directly (no Playwright
+  layer), and the upstream README recommends the genuine Chrome binary.
+- Linux without a display: `Xvfb` (the code auto-starts it on `:99` if
+  `DISPLAY` isn't already set).
+- `CHROME_PATH` env var if Chrome isn't in one of the auto-detected
+  locations (see `EzSolver/solver.py:_find_chrome()`).
 
-```bash
-cd turnstile-defense-test
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
+## Known rough edges in the upstream code (review before relying on it)
 
-Edit `.env`:
-- `TARGET_SITEURL` — the exact page with the widget.
-- `TARGET_SITEKEY` — read from the page source: look for
-  `data-sitekey="..."` on the `cf-turnstile` div, or the `sitekey` passed
-  to `turnstile.render(...)`.
-- `VERIFY_ENDPOINT` (optional) — your backend endpoint that receives the
-  token. Leave blank to only test token acquisition.
-- `VERIFY_EXTRA_FIELDS` (optional) — any other fields your endpoint needs
-  to run a real lookup. **Use a known test invoice number, never a real
-  customer's data.**
-
-## Run
-
-```bash
-python run_test.py
-```
-
-You'll be asked to confirm you're authorized to test the target before
-anything touches it.
-
-## Reading the result
-
-| Token acquisition | Backend acceptance | Meaning |
-|---|---|---|
-| Failed | — | Good sign — your widget config (e.g. Managed mode, domain binding) is holding up against this particular tool. Not proof against all tools. |
-| Succeeded | Rejected | Turnstile alone didn't stop the solver, but your backend has a real second layer (replay check, siteverify re-validation, extra required state). This is the healthy configuration. |
-| Succeeded | Accepted | Your backend treats "has a valid Turnstile token" as sufficient. Add: server-side `siteverify` re-check per submission with one-time-use enforcement, rate limiting per IP/session, and anomaly detection on request patterns (sequential invoice IDs, abnormal request rate, etc.). |
-
-## Trying the other candidates later
-
-To compare against `Theyka/Turnstile-Solver` or `odell0111/turnstile_solver`
-instead, clone them alongside `EzSolver/` and swap the import in
-`step1_solve_token()` for their respective client call — both expose a
-similar HTTP API (`POST` with `sitekey`/`site_key` + `siteurl`/`site_url`,
-returning a token). Keep the rest of the harness (the authorization prompt
-and the backend-acceptance check) unchanged.
+- `EzSolver/service.py`'s HTTP server binds `0.0.0.0` with **no
+  authentication or rate limiting** — the upstream README itself warns
+  about this. Our `run_test.py` doesn't use `service.py` at all (it calls
+  `solver.solve()` in-process), so this doesn't apply to our test, but
+  it's relevant if this repo is ever reused to run a persistent service.
+- `clientsend.py` hardcodes `SERVICE_URL = "http://127.0.0.1:8191/solve"`
+  — irrelevant to us since we bypass it, noted only for completeness.
