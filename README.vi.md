@@ -14,15 +14,16 @@ Chỉ `undetected-chromedriver` (`SOLVER_BACKEND=uc`,
 default cho 2 script bên dưới. `nodriver` và `playwright-stealth` đã
 thử và bị chặn.
 
-## Các bài test
+## Các script
 
-| Script | Làm gì | Trả lời câu hỏi |
+| Script | Nhận vào | Làm gì |
 |---|---|---|
-| `run_test.py` | Lấy token qua EzSolver (`uc`), rồi gửi thẳng HTTP POST tới `POST /api/search` (endpoint/payload reverse-engineer bằng `capture_request.py`). Chạy ngầm, bước gửi HTTP không cần trình duyệt hiện. Hỗ trợ `MAX_WORKERS>1` để chạy song song nhiều bộ hồ sơ, mỗi bộ 1 browser riêng. | "Backend có chấp nhận token mà không cần phiên trình duyệt thật, và có chặn request đồng thời không?" |
-| `capture_request.py` | Chạy 1 lần: lái UI thật bằng `uc`, hook `fetch`/`XMLHttpRequest`, dump đúng request trang gửi vào `captured_request.json`. Dùng để tìm ra endpoint/payload cho `run_test.py`. | — |
+| `get_tracuu_einvoice365.py` | **một** object result_json | Lấy **một** hóa đơn, trả về `{"file_pdf": None, "file_xml": <đường dẫn>}`. Đây là điểm vào để tích hợp — import `get_file()` vào project của bạn, hoặc chạy trực tiếp để lấy 1 file. |
+| `run_test.py` | một **mảng** object | Harness test: giải Turnstile qua backend `uc`, gửi token tới `POST /api/search` (endpoint/payload reverse-engineer bằng `capture_request.py`) cho từng bộ, lưu từng XML. Hỗ trợ `MAX_WORKERS>1` để chạy song song, mỗi bộ 1 browser — trả lời: "Backend có nhận token mà không cần phiên trình duyệt thật, và có rate-limit không?" |
+| `capture_request.py` | — | Chạy 1 lần: lái UI thật bằng `uc`, hook `fetch`/`XMLHttpRequest`, dump đúng request trang gửi vào `captured_request.json`. Dùng để tìm ra endpoint/payload. |
 
-`run_test.py` lặp qua các entry trong `test_cases.json` (hoặc `TEST_CASES`
-trong `.env` nếu file đó không tồn tại).
+`run_test.py` lặp qua các cặp trong `test_cases.json` (hoặc `--cases <path>`);
+`get_tracuu_einvoice365.py` xử lý đúng một cặp.
 
 ## Các lệnh chạy
 
@@ -30,6 +31,23 @@ trong `.env` nếu file đó không tồn tại).
 cp .env.example .env            # cài 1 lần: set TARGET_SITEURL/SITEKEY
 pip install -r requirements.txt
 ```
+
+### Lấy MỘT hóa đơn (vào là 1 object → ra 1 file)
+
+```bash
+python get_tracuu_einvoice365.py --case '{"info": {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"}}'
+```
+
+Hoặc đọc từ file chứa 1 object, hoặc pipe qua stdin:
+
+```bash
+python get_tracuu_einvoice365.py --file one_case.json
+echo '{"info": {"tax_code": "...", "lookup_code": "..."}}' | python get_tracuu_einvoice365.py
+```
+
+In ra dict kết quả và lưu XML vào `logs/xmls/` (đổi bằng `--out <dir>`).
+Đây là script để chạy khi chỉ tra 1 hồ sơ, và là module để import khi
+tích hợp vào project của bạn (xem bên dưới).
 
 ### Bài test chính — bypass qua raw-HTTP chạy ngầm + tải XML (ưu tiên, không cần UI)
 
@@ -92,6 +110,9 @@ flowchart TD
     J -->|hết| EF[error — kết quả cuối]
 ```
 
+Để lấy một hóa đơn, dùng `get_tracuu_einvoice365.py` — cùng luồng
+giải+verify+lưu, vào 1 object ra 1 file (xem **Tích hợp**).
+
 Các bộ test khác nhau chạy song song khi `MAX_WORKERS>1` (mỗi bộ 1 browser
 riêng, qua `ThreadPoolExecutor`); chỉ `error` mới retry — `skipped`,
 `not_found`, `rejected`, `accepted` luôn là kết quả cuối.
@@ -126,6 +147,43 @@ traceback) bên cạnh output console ngắn gọn. Khi một bước lỗi, cò
 thêm screenshot + HTML trang vào `logs/`. File XML tải được qua
 `run_test.py` nằm ở `logs/xmls/`. **`logs/` đã gitignore** — nó có thể
 chứa dữ liệu hóa đơn thật.
+
+## Tích hợp
+
+Để gắn vào project khác (ví dụ thay thế `GetFolderTraCuuEinvoice365.get_file`),
+import `get_file` từ `get_tracuu_einvoice365.py` và gọi với một object:
+
+```python
+from get_tracuu_einvoice365 import get_file
+
+result_json = {"info": {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"}}
+result = get_file(result_json)             # tùy chọn: get_file(result_json, download_dir="/thư/mục/của/bạn")
+# -> {"file_pdf": None, "file_xml": "/abs/path/invoice_0314218920_j5nnm3lzo5.xml"}
+
+if result["file_xml"]:
+    ...  # XML hóa đơn đã lưu tại đường dẫn đó
+else:
+    ...  # không có file: backend từ chối, response không có 'xml', hoặc hết lượt thử
+```
+
+Hợp đồng (contract):
+
+- **Vào** — một dict `result_json` dạng `{"info": {"tax_code", "lookup_code"}}`
+  (một object, không phải mảng). Mảng là việc của `run_test.py`.
+- **Ra** — `{"file_pdf": None, "file_xml": <đường dẫn tuyệt đối | None>}`.
+  `file_pdf` luôn `None` (luồng này chỉ lấy XML).
+- **Retry** — chỉ khi **lỗi kỹ thuật** (lấy token/HTTP hỏng), tối đa
+  `MAX_ATTEMPTS`. Câu trả lời "không có file" rõ ràng là kết quả cuối.
+- **Cấu hình** — đọc từ `.env`/môi trường: `TARGET_SITEURL`,
+  `TARGET_SITEKEY`, `VERIFY_ENDPOINT`, `VERIFY_TOKEN_FIELD`,
+  `SOLVER_BACKEND` (`uc`), `MAX_ATTEMPTS`, `DOWNLOAD_DIR`.
+- **Không side effect khi import** — module không thêm log handler và
+  không mở browser lúc import; chỉ mở browser khi bạn gọi `get_file()`.
+  App của bạn tự cấu hình logging trên logger `get_tracuu_einvoice365`.
+
+Yêu cầu cho project tích hợp: có `EzSolver/` trong path (được thêm tự động
+theo vị trí file này), các package trong `requirements.txt`, và vẫn cần
+Chrome thật như mục dưới.
 
 ## Yêu cầu
 
