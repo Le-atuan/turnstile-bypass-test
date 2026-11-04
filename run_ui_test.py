@@ -148,7 +148,7 @@ async def find_button_rect(page, view_id: str, text: str):
     matches `text` — so it doesn't break if the view-id differs.
     Returns a dict with x/y/w/h (+ tag/id/cls for logging) or None.
     """
-    return await page.evaluate("""
+    raw = await page.evaluate("""
         (() => {
             const VIEW_ID = %s;
             const TEXT = %s;
@@ -172,14 +172,15 @@ async def find_button_rect(page, view_id: str, text: str):
                 el = hits[0] || null;
             }
 
-            if (!el) return null;
+            if (!el) return 'null';
             el.scrollIntoView({block: 'center', inline: 'center'});
             const r = el.getBoundingClientRect();
-            if (r.width <= 0 || r.height <= 0) return null;
-            return {x: r.x, y: r.y, w: r.width, h: r.height,
-                    tag: el.tagName, id: el.id, cls: el.className};
+            if (r.width <= 0 || r.height <= 0) return 'null';
+            return JSON.stringify({x: r.x, y: r.y, w: r.width, h: r.height,
+                    tag: el.tagName, id: el.id, cls: el.className});
         })()
     """ % (json.dumps(view_id), json.dumps(text)))
+    return json.loads(raw) if raw else None
 
 
 async def click_rect(page, rect):
@@ -248,7 +249,8 @@ async def maybe_click_download_xml(page, run_label: str):
         await click_rect(page, rect)
         await asyncio.sleep(2)  # let any download/navigation happen
 
-        probe = await page.evaluate("window.__xmlClickProbe || {}")
+        probe_raw = await page.evaluate("JSON.stringify(window.__xmlClickProbe || {})")
+        probe = json.loads(probe_raw) if probe_raw else {}
         logger.info("Run %s: 'Tải XML' click — opened new tab: %s, new blob: %s",
                     run_label, probe.get("opened"), bool(probe.get("blobUrl")))
         if probe.get("blobUrl"):
@@ -258,36 +260,35 @@ async def maybe_click_download_xml(page, run_label: str):
         logger.debug("Traceback:\n%s", traceback.format_exc())
 
 
-async def wait_for_result(page, timeout: int, baseline_len: int) -> bool:
-    """Poll for the lookup result, using several signals so it doesn't
-    depend on one view-id: the Webix status banner becoming visible, a
-    PDF viewer / iframe appearing, or the page text growing noticeably
-    from baseline_len (captured just before the submit click). This can
-    take 5-8s, so we poll rather than sleep a fixed amount.
+async def wait_for_outcome(page, timeout: int) -> str | None:
+    """Poll for the lookup outcome. Only two signals count as conclusive:
+    the "Tải XML" button appearing (the invoice actually rendered) or a
+    'not found' phrase appearing in the page text. (The old generic
+    iframe/canvas/text-length heuristics false-positived immediately on
+    the Turnstile widget's own iframe, before any real result existed.)
+    Returns OUTCOME_SUCCESS, OUTCOME_NOT_FOUND, or None on timeout.
     """
     deadline = time.time() + timeout
     poll_count = 0
     while time.time() < deadline:
         poll_count += 1
-        signal = await page.evaluate("""
-            (() => {
-                const BASE = %d;
-                if (typeof webix !== 'undefined' && webix.$$) {
-                    const v = webix.$$('search:status');
-                    if (v && v.isVisible && v.isVisible()) return 'status-banner';
-                }
-                if (document.querySelector('iframe, embed, canvas')) return 'pdf-viewer';
-                const len = (document.body.innerText || '').length;
-                if (len > BASE + 40) return 'text-grew';
-                return '';
-            })()
-        """ % baseline_len)
-        if signal:
-            logger.debug("Result detected (%s) after %d poll(s)", signal, poll_count)
-            return True
+
+        body_text = await page.evaluate("document.body.innerText || ''")
+        lowered = (body_text or "").lower()
+        matched_keyword = next((kw for kw in NOT_FOUND_KEYWORDS if kw.lower() in lowered), None)
+        if matched_keyword:
+            logger.debug("Result detected (not-found keyword: %s) after %d poll(s)",
+                         matched_keyword, poll_count)
+            return OUTCOME_NOT_FOUND
+
+        rect = await find_button_rect(page, "search:btnxml", "Tải XML")
+        if rect:
+            logger.debug("Result detected ('Tải XML' button present) after %d poll(s)", poll_count)
+            return OUTCOME_SUCCESS
+
         await asyncio.sleep(0.5)
-    logger.debug("No result signal after %d poll(s) / %ds", poll_count, timeout)
-    return False
+    logger.debug("No conclusive result after %d poll(s) / %ds", poll_count, timeout)
+    return None
 
 
 async def read_result_text(page) -> str:
@@ -406,11 +407,6 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             return OUTCOME_ERROR
 
         try:
-            baseline_len = await page.evaluate("(document.body.innerText || '').length")
-        except Exception:
-            baseline_len = 0
-
-        try:
             await click_submit_button(page)
         except Exception:
             logger.error("Run %s: FAILED to click the 'Tra cứu' button.", run_label)
@@ -420,42 +416,34 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
 
         logger.info("Submitted. Waiting for the result (up to %ds)...", RESULT_WAIT_TIMEOUT)
         try:
-            got_result = await wait_for_result(page, timeout=RESULT_WAIT_TIMEOUT, baseline_len=baseline_len)
+            outcome = await wait_for_outcome(page, timeout=RESULT_WAIT_TIMEOUT)
         except Exception:
-            logger.error("Run %s: FAILED while polling for the result banner.", run_label)
+            logger.error("Run %s: FAILED while polling for the result.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
             await dump_failure_artifacts(page, run_label, "result_poll_error")
             return OUTCOME_ERROR
 
-        if not got_result:
-            logger.warning("Run %s: no result banner within %ds — treated as a retryable error "
-                           "(could be 'no match' or an unregistered click).", run_label, RESULT_WAIT_TIMEOUT)
+        if outcome is None:
+            logger.warning("Run %s: no 'Tải XML' button and no 'not found' phrase within %ds — "
+                           "treated as a retryable error.", run_label, RESULT_WAIT_TIMEOUT)
             await dump_failure_artifacts(page, run_label, "no_result")
             return OUTCOME_ERROR
 
         try:
             body_text = await read_result_text(page)
+            logger.info("Result content (first 600 chars):")
+            logger.info(body_text)
         except Exception:
-            logger.error("Run %s: FAILED to read the result content.", run_label)
-            logger.debug("Traceback:\n%s", traceback.format_exc())
-            await dump_failure_artifacts(page, run_label, "read_result_error")
-            return OUTCOME_ERROR
-
-        logger.info("Result content (first 600 chars):")
-        logger.info(body_text)
-
-        await maybe_click_download_xml(page, run_label)
+            logger.debug("Could not read result content for logging (non-fatal).")
 
         elapsed = round(time.time() - t0, 2)
-        lowered = (body_text or "").lower()
-        matched_keyword = next((kw for kw in NOT_FOUND_KEYWORDS if kw.lower() in lowered), None)
 
-        if matched_keyword:
-            logger.warning("Run %s RESULT: NOT FOUND — matched \"%s\" (%ss). Final, not retried.",
-                           run_label, matched_keyword, elapsed)
+        if outcome == OUTCOME_NOT_FOUND:
+            logger.warning("Run %s RESULT: NOT FOUND (%ss). Final, not retried.", run_label, elapsed)
             return OUTCOME_NOT_FOUND
 
-        logger.info("Run %s RESULT: SUCCESS — no 'not found' phrase, in %ss.", run_label, elapsed)
+        await maybe_click_download_xml(page, run_label)
+        logger.info("Run %s RESULT: SUCCESS — 'Tải XML' button present, in %ss.", run_label, elapsed)
         return OUTCOME_SUCCESS
 
     except Exception:
