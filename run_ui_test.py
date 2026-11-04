@@ -142,31 +142,48 @@ async def wait_for_token(page, timeout: int) -> bool:
     return False
 
 
-async def click_submit_button(page):
-    """Click the real "Tra cứu" button.
-
-    The UI is Webix: buttons are <div>s with randomized DOM ids but a
-    stable view-id (search:btnsearch). We locate it via webix.$$() and
-    click its real screen coordinates, since synthetic .click() is
-    unreliable here (a sibling button has no handler bound).
+async def find_button_rect(page, view_id: str, text: str):
+    """Locate a button's on-screen rect. Tries the Webix view-id first,
+    then falls back to finding the smallest visible element whose text
+    matches `text` — so it doesn't break if the view-id differs.
+    Returns a dict with x/y/w/h (+ tag/id/cls for logging) or None.
     """
-    rect = await page.evaluate("""
+    return await page.evaluate("""
         (() => {
-            if (typeof webix === 'undefined') return null;
-            const v = webix.$$('search:btnsearch');
-            if (!v || !v.$view) return null;
-            const el = v.$view.querySelector('button') || v.$view;
+            const VIEW_ID = %s;
+            const TEXT = %s;
+            let el = null;
+
+            if (typeof webix !== 'undefined' && webix.$$) {
+                const v = webix.$$(VIEW_ID);
+                if (v && v.$view) el = v.$view.querySelector('button') || v.$view;
+            }
+
+            if (!el) {
+                const nodes = [...document.querySelectorAll('button, a, div, span')];
+                const hits = nodes.filter(n => {
+                    const t = (n.innerText || '').trim();
+                    return t && t.includes(TEXT) && t.length < 30 && n.offsetParent !== null;
+                });
+                hits.sort((a, b) => {
+                    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                    return (ra.width * ra.height) - (rb.width * rb.height);
+                });
+                el = hits[0] || null;
+            }
+
+            if (!el) return null;
+            el.scrollIntoView({block: 'center', inline: 'center'});
             const r = el.getBoundingClientRect();
             if (r.width <= 0 || r.height <= 0) return null;
-            return {x: r.x, y: r.y, w: r.width, h: r.height};
+            return {x: r.x, y: r.y, w: r.width, h: r.height,
+                    tag: el.tagName, id: el.id, cls: el.className};
         })()
-    """)
-    if not rect:
-        raise RuntimeError(
-            "Could not locate search:btnsearch via webix.$$() — Webix may "
-            "not be loaded, the view-id changed, or the button isn't visible."
-        )
+    """ % (json.dumps(view_id), json.dumps(text)))
 
+
+async def click_rect(page, rect):
+    """Move the mouse and click the center of a rect, with small jitter."""
     cx = rect["x"] + rect["w"] / 2 + random.uniform(-3, 3)
     cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
     await page.mouse_move(cx - 40, cy - 10)
@@ -176,45 +193,38 @@ async def click_submit_button(page):
     await page.mouse_click(cx, cy)
 
 
+async def click_submit_button(page):
+    """Click the real "Tra cứu" button (by view-id, else by its text)."""
+    rect = await find_button_rect(page, "search:btnsearch", "Tra cứu")
+    if not rect:
+        raise RuntimeError(
+            "Could not locate the 'Tra cứu' button by view-id or by text — "
+            "check the saved HTML snapshot."
+        )
+    logger.debug("Submit button found: tag=%s id=%s cls=%s",
+                 rect.get("tag"), rect.get("id"), rect.get("cls"))
+    await click_rect(page, rect)
+
+
 async def maybe_click_download_xml(page, run_label: str):
-    """If the "Tải XML" button is visible, click it and report whether a
+    """If the "Tải XML" button is present, click it and report whether a
     new tab/blob resulted. Informational only — never affects the outcome,
     and any error here is logged as a warning. (Recon found no handler
     bound on this button, so a click likely does nothing.)
     """
     try:
-        visible = await page.evaluate("""
-            (() => {
-                if (typeof webix === 'undefined') return false;
-                const v = webix.$$('search:btnxml');
-                return !!(v && v.isVisible && v.isVisible());
-            })()
-        """)
+        rect = await find_button_rect(page, "search:btnxml", "Tải XML")
     except Exception as exc:
-        logger.warning("Run %s: could not check 'Tải XML' visibility (non-fatal): %s", run_label, exc)
+        logger.warning("Run %s: could not locate 'Tải XML' (non-fatal): %s", run_label, exc)
         return
 
-    if not visible:
-        logger.debug("Run %s: 'Tải XML' button not visible — nothing to click.", run_label)
+    if not rect:
+        logger.debug("Run %s: 'Tải XML' button not found — nothing to click.", run_label)
         return
 
-    logger.info("Run %s: 'Tải XML' visible — clicking it (best-effort)...", run_label)
+    logger.info("Run %s: 'Tải XML' found — clicking it (best-effort)...", run_label)
 
     try:
-        rect = await page.evaluate("""
-            (() => {
-                const v = webix.$$('search:btnxml');
-                if (!v || !v.$view) return null;
-                const el = v.$view.querySelector('button') || v.$view;
-                const r = el.getBoundingClientRect();
-                if (r.width <= 0 || r.height <= 0) return null;
-                return {x: r.x, y: r.y, w: r.width, h: r.height};
-            })()
-        """)
-        if not rect:
-            logger.warning("Run %s: 'Tải XML' visible but its rect couldn't be read — skipping.", run_label)
-            return
-
         # Hook window.open/createObjectURL to detect if THIS click does anything.
         await page.evaluate("""
             (() => {
@@ -235,14 +245,7 @@ async def maybe_click_download_xml(page, run_label: str):
             })()
         """)
 
-        cx = rect["x"] + rect["w"] / 2 + random.uniform(-3, 3)
-        cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
-        await page.mouse_move(cx - 30, cy - 8)
-        await asyncio.sleep(random.uniform(0.15, 0.3))
-        await page.mouse_move(cx, cy)
-        await asyncio.sleep(random.uniform(0.08, 0.2))
-        await page.mouse_click(cx, cy)
-
+        await click_rect(page, rect)
         await asyncio.sleep(2)  # let any download/navigation happen
 
         probe = await page.evaluate("window.__xmlClickProbe || {}")
@@ -255,26 +258,35 @@ async def maybe_click_download_xml(page, run_label: str):
         logger.debug("Traceback:\n%s", traceback.format_exc())
 
 
-async def wait_for_result(page, timeout: int) -> bool:
-    """Poll the Webix result banner (search:status) until visible.
-    This can take 5-8s, so we poll rather than sleep a fixed amount.
+async def wait_for_result(page, timeout: int, baseline_len: int) -> bool:
+    """Poll for the lookup result, using several signals so it doesn't
+    depend on one view-id: the Webix status banner becoming visible, a
+    PDF viewer / iframe appearing, or the page text growing noticeably
+    from baseline_len (captured just before the submit click). This can
+    take 5-8s, so we poll rather than sleep a fixed amount.
     """
     deadline = time.time() + timeout
     poll_count = 0
     while time.time() < deadline:
         poll_count += 1
-        visible = await page.evaluate("""
+        signal = await page.evaluate("""
             (() => {
-                if (typeof webix === 'undefined') return false;
-                const v = webix.$$('search:status');
-                return !!(v && v.isVisible && v.isVisible());
+                const BASE = %d;
+                if (typeof webix !== 'undefined' && webix.$$) {
+                    const v = webix.$$('search:status');
+                    if (v && v.isVisible && v.isVisible()) return 'status-banner';
+                }
+                if (document.querySelector('iframe, embed, canvas')) return 'pdf-viewer';
+                const len = (document.body.innerText || '').length;
+                if (len > BASE + 40) return 'text-grew';
+                return '';
             })()
-        """)
-        if visible:
-            logger.debug("search:status became visible after %d poll(s)", poll_count)
+        """ % baseline_len)
+        if signal:
+            logger.debug("Result detected (%s) after %d poll(s)", signal, poll_count)
             return True
         await asyncio.sleep(0.5)
-    logger.debug("search:status never visible after %d poll(s) / %ds", poll_count, timeout)
+    logger.debug("No result signal after %d poll(s) / %ds", poll_count, timeout)
     return False
 
 
@@ -390,6 +402,11 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             return OUTCOME_ERROR
 
         try:
+            baseline_len = await page.evaluate("(document.body.innerText || '').length")
+        except Exception:
+            baseline_len = 0
+
+        try:
             await click_submit_button(page)
         except Exception:
             logger.error("Run %s: FAILED to click the 'Tra cứu' button.", run_label)
@@ -397,9 +414,9 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
             await dump_failure_artifacts(page, run_label, "click_submit_error")
             return OUTCOME_ERROR
 
-        logger.info("Submitted. Waiting for the result banner (up to %ds)...", RESULT_WAIT_TIMEOUT)
+        logger.info("Submitted. Waiting for the result (up to %ds)...", RESULT_WAIT_TIMEOUT)
         try:
-            got_result = await wait_for_result(page, timeout=RESULT_WAIT_TIMEOUT)
+            got_result = await wait_for_result(page, timeout=RESULT_WAIT_TIMEOUT, baseline_len=baseline_len)
         except Exception:
             logger.error("Run %s: FAILED while polling for the result banner.", run_label)
             logger.debug("Traceback:\n%s", traceback.format_exc())
