@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "EzSolver"))
@@ -42,6 +43,8 @@ VERIFY_TOKEN_FIELD = os.environ.get("VERIFY_TOKEN_FIELD", "cf-turnstile-response
 VERIFY_EXTRA_FIELDS = json.loads(os.environ.get("VERIFY_EXTRA_FIELDS", "{}") or "{}")
 TEST_CASES = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries on technical failure only
+SOLVER_BACKEND = os.environ.get("SOLVER_BACKEND", "uc").strip()  # nodriver | uc
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "1"))  # >1 runs test cases concurrently, each its own browser
 
 # Phrases meaning "no record found" — guessed; adjust once a real one is seen.
 NOT_FOUND_KEYWORDS = [
@@ -112,10 +115,18 @@ def require_own_site_ack():
         sys.exit(1)
 
 
-def step1_solve_token(run_label: str):
-    from solver import solve  # EzSolver/solver.py
+def _load_solve_fn():
+    if SOLVER_BACKEND == "uc":
+        from solver_uc import solve
+    else:
+        from solver import solve  # EzSolver/solver.py (nodriver)
+    return solve
 
-    logger.info("[1/2] Requesting a Turnstile token for sitekey=%r ...", SITEKEY)
+
+def step1_solve_token(run_label: str):
+    solve = _load_solve_fn()
+
+    logger.info("[1/2] Requesting a Turnstile token (backend=%s) for sitekey=%r ...", SOLVER_BACKEND, SITEKEY)
     t0 = time.time()
     token = solve(SITEKEY, SITEURL, timeout=60)
     elapsed = round(time.time() - t0, 2)
@@ -127,16 +138,17 @@ def step1_solve_token(run_label: str):
 def step2_verify_with_backend(token: str, tax_code: str, lookup_code: str):
     logger.info("[2/2] Submitting token to your backend: %s %s", VERIFY_METHOD, VERIFY_ENDPOINT)
     payload = {
+        "mst": tax_code,
+        "sec": lookup_code,
+        "action": "search",
         VERIFY_TOKEN_FIELD: token,
-        "tax_code": tax_code,
-        "lookup_code": lookup_code,
         **VERIFY_EXTRA_FIELDS,
     }
 
     if VERIFY_METHOD == "GET":
         resp = requests.get(VERIFY_ENDPOINT, params=payload, timeout=30)
     else:
-        resp = requests.post(VERIFY_ENDPOINT, data=payload, timeout=30)
+        resp = requests.post(VERIFY_ENDPOINT, json=payload, timeout=30)
 
     logger.info("      -> HTTP %s", resp.status_code)
     snippet = resp.text[:300].replace("\n", " ")
@@ -144,8 +156,23 @@ def step2_verify_with_backend(token: str, tax_code: str, lookup_code: str):
     return resp
 
 
+def save_xml(run_label: str, tax_code: str, lookup_code: str, xml_content: str) -> str:
+    """Saves the XML extracted from the api/search response's own `xml` field
+    (the real page never makes a second HTTP call for it — see portal.js:
+    the "Tải XML" button just Blob()s this same field). Returns the file path."""
+    xml_dir = os.path.join(LOG_DIR, "xmls")
+    os.makedirs(xml_dir, exist_ok=True)
+    safe_label = run_label.replace("/", "-").replace(" ", "_").replace("(", "").replace(")", "")
+    path = os.path.join(xml_dir, f"invoice_{tax_code}_{lookup_code}_{safe_label}.xml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(xml_content)
+    return path
+
+
 def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
-    """Run one test case. Returns accepted / rejected / not_found / error."""
+    """Run one test case. Returns accepted / rejected / not_found / error.
+    `accepted` only when the XML was actually extracted and saved to disk —
+    a bypass that gets a 2xx with no usable XML is not a successful test."""
     logger.info("\n--- Run %s (tax_code=%s, lookup_code=%s) ---", run_label, tax_code, lookup_code)
     t0 = time.time()
 
@@ -176,13 +203,25 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
                        run_label, matched_keyword, elapsed)
         return OUTCOME_NOT_FOUND
 
-    accepted = 200 <= resp.status_code < 300
-    outcome = OUTCOME_ACCEPTED if accepted else OUTCOME_REJECTED
-    logger.info(
-        "Run %s RESULT: %s (HTTP %s, %ss). Final — not retried.",
-        run_label, outcome.upper(), resp.status_code, elapsed,
-    )
-    return outcome
+    if not (200 <= resp.status_code < 300):
+        logger.info("Run %s RESULT: REJECTED (HTTP %s, %ss). Final — not retried.",
+                    run_label, resp.status_code, elapsed)
+        return OUTCOME_REJECTED
+
+    try:
+        xml_content = resp.json().get("xml")
+    except ValueError:
+        xml_content = None
+
+    if not xml_content:
+        logger.warning("Run %s RESULT: REJECTED — HTTP 2xx but no 'xml' field in the response "
+                       "(%ss). Bypass alone isn't a successful test.", run_label, elapsed)
+        return OUTCOME_REJECTED
+
+    xml_path = save_xml(run_label, tax_code, lookup_code, xml_content)
+    logger.info("Run %s RESULT: ACCEPTED — XML saved to %s (%ss). Final — not retried.",
+                run_label, xml_path, elapsed)
+    return OUTCOME_ACCEPTED
 
 
 def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> str:
@@ -224,22 +263,32 @@ def main():
 
     require_own_site_ack()
 
-    results = []
     total = len(TEST_CASES)
+    jobs = []  # (index, tax_code, lookup_code) for well-formed cases
+    results = [None] * total
     for i, case in enumerate(TEST_CASES, start=1):
         try:
-            tax_code = case["tax_code"]
-            lookup_code = case["lookup_code"]
+            jobs.append((i, case["tax_code"], case["lookup_code"]))
         except (KeyError, TypeError):
             logger.error(
                 "TEST_CASES entry %d is malformed (expected keys 'tax_code' "
                 "and 'lookup_code'): %r", i, case
             )
-            results.append(OUTCOME_ERROR)
-            continue
+            results[i - 1] = OUTCOME_ERROR
 
-        outcome = run_with_retries(f"{i}/{total}", tax_code, lookup_code)
-        results.append(outcome)
+    if MAX_WORKERS > 1:
+        logger.info("Running %d test case(s) with up to %d concurrent browsers...", len(jobs), MAX_WORKERS)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(run_with_retries, f"{i}/{total}", tax_code, lookup_code): i
+                for i, tax_code, lookup_code in jobs
+            }
+            for future in as_completed(futures):
+                i = futures[future]
+                results[i - 1] = future.result()
+    else:
+        for i, tax_code, lookup_code in jobs:
+            results[i - 1] = run_with_retries(f"{i}/{total}", tax_code, lookup_code)
 
     accepted = results.count(OUTCOME_ACCEPTED)
     rejected = results.count(OUTCOME_REJECTED)

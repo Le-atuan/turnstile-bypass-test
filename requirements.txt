@@ -1,3 +1,7 @@
 nodriver>=0.36
 requests>=2.31
 python-dotenv>=1.0
+
+# optional — only needed for SOLVER_BACKEND=uc (the backend that actually
+# gets past Turnstile; see EzSolver/solver_uc.py)
+undetected-chromedriver

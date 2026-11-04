@@ -95,12 +95,44 @@ def _start_xvfb_if_needed(display: str = ":99") -> Optional[subprocess.Popen]:
     return proc
 
 
+def _clear_stale_singleton_lock(profile_dir: str) -> None:
+    """Remove a leftover SingletonLock if the PID it names is no longer running.
+
+    A profile dir reused across runs can be left with a stale lock when Chrome
+    is killed ungracefully (e.g. SIGKILL) instead of via browser.stop(). Chrome
+    then stalls for ~100s on next launch trying to reach the dead process
+    before giving up and proceeding.
+    """
+    lock_path = os.path.join(profile_dir, "SingletonLock")
+    try:
+        target = os.readlink(lock_path)
+    except OSError:
+        return
+    pid_str = target.rsplit("-", 1)[-1]
+    if not pid_str.isdigit():
+        return
+    try:
+        os.kill(int(pid_str), 0)
+        return  # still alive, leave it alone
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            os.remove(os.path.join(profile_dir, name))
+        except OSError:
+            pass
+
+
 async def start_browser(profile_dir: Optional[str] = None) -> uc.Browser:
     """Launch an optimized Chrome browser with minimal resource consumption."""
+    resolved_dir = profile_dir or _get_profile_dir()
+    _clear_stale_singleton_lock(resolved_dir)
     return await uc.start(
         browser_executable_path=_find_chrome(),
         headless=False,
-        user_data_dir=profile_dir or _get_profile_dir(),
+        user_data_dir=resolved_dir,
         browser_args=CHROME_ARGS,
         sandbox=not _is_root(),
     )
@@ -110,11 +142,10 @@ async def solve_on_page(page: uc.Tab, sitekey: str, siteurl: str, timeout: int =
     """Solve Cloudflare Turnstile on a given page/tab."""
     await page.get(siteurl)
 
-    # 1. Clean HTML, halt background network activity, and intercept attachShadow
+    # 1. Keep the real page DOM (cookies/session/referer context intact);
+    #    just intercept attachShadow and append the widget box.
     await page.evaluate(f"""
         (() => {{
-            window.stop();
-            document.body.innerHTML = '';
             window._tsToken = null;
             window._tsError = null;
 
@@ -201,9 +232,11 @@ async def solve_on_page(page: uc.Tab, sitekey: str, siteurl: str, timeout: int =
     rect = None
 
     # Wait up to 5s for token or iframe to appear
-    for _ in range(10):
+    for i in range(10):
         await asyncio.sleep(0.5)
         st = await get_state()
+        if not st and not rect:
+            print(f"[solver] waiting for widget... ({(i + 1) * 0.5:.1f}s)")
         if st.get("error"):
             error_code = str(st["error"])
         
@@ -229,11 +262,16 @@ async def solve_on_page(page: uc.Tab, sitekey: str, siteurl: str, timeout: int =
             return st["token"]
         rect = await get_cf_iframe_rect()
         if rect:
+            print(f"[solver] widget iframe found at {rect}")
             break
+
+    if not rect:
+        print("[solver] WARNING: no Cloudflare iframe found after 5s initial wait")
 
     deadline = start_time + timeout
     click_count = 0
     last_click = 0.0
+    last_status = 0.0
 
     while asyncio.get_event_loop().time() < deadline:
         st = await get_state()
@@ -243,6 +281,11 @@ async def solve_on_page(page: uc.Tab, sitekey: str, siteurl: str, timeout: int =
             return st["token"]
 
         now = asyncio.get_event_loop().time()
+        if now - last_status > 5:
+            elapsed = now - start_time
+            print(f"[solver] still waiting ({elapsed:.1f}s elapsed, {click_count} click(s) so far, rect={'found' if rect else 'none'})")
+            last_status = now
+
         if click_count == 0 or (now - last_click > 6):
             if click_count >= 4:
                 await asyncio.sleep(0.3)
