@@ -76,25 +76,24 @@ Mở `.env` bằng một editor và kiểm tra/điền:
 - Để trống `VERIFY_ENDPOINT` nếu bạn chỉ muốn kiểm tra xem có lấy được
   token hay không, mà không chạm vào endpoint tra cứu.
 
-`run_ui_test_uc.py` / `run_ui_test.py` vẫn đọc bộ test từ `TEST_CASES`
-trong `.env`; `run_test.py` (bước 5 dưới đây) thì không.
-
 ## 5. Khai báo bộ test cho `run_test.py`
 
-`run_test.py` lấy các cặp tax_code/lookup_code từ 1 file JSON, không phải
-từ `.env`. Tạo file `test_cases.json` ở thư mục gốc project:
+`run_test.py` lấy bộ test từ `test_cases.json` nếu file đó tồn tại, nếu
+không thì fallback đọc `TEST_CASES` trong `.env`. Dù nguồn nào, mỗi entry
+phải đúng shape `result_json` mà `get_file()` dùng:
 
 ```json
 [
-  {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"},
-  {"tax_code": "0400495597", "lookup_code": "mr3pye3m65"}
+  {"info": {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"}},
+  {"info": {"tax_code": "0400495597", "lookup_code": "mr3pye3m65"}}
 ]
 ```
 
-Field thừa (`invoice_no`, `document_id`...) bị bỏ qua nếu có, nên bạn có
-thể paste thẳng data export lớn hơn vào. Cặp nào đã có trong
-`logs/downloaded.json` (từ lần chạy thành công trước) sẽ tự động bị bỏ
-qua, kể cả khi dùng `--cases` với file khác.
+Chạy nhanh/local: chỉ cần sửa `TEST_CASES` trong `.env`, không cần tạo
+file. Batch lớn hoặc chạy riêng: tạo `test_cases.json` (hoặc dùng
+`--cases /đường/dẫn/file.json`) — file này được ưu tiên hơn `.env` nếu
+tồn tại. Cặp nào đã có trong `logs/downloaded.json` (từ lần chạy thành
+công trước) sẽ tự động bị bỏ qua dù dùng nguồn nào.
 
 ## 6. Chạy test
 
@@ -104,8 +103,7 @@ python run_test.py --cases /đường/dẫn/tới/file_của_bạn.json  # hoặ
 ```
 
 Điều gì sẽ xảy ra:
-1. Script in ra URL mục tiêu và **yêu cầu bạn gõ `y` để xác nhận bạn
-   được phép test nó** — chưa có gì chạm tới mạng trước khi bạn xác
+1. Script log URL mục tiêu và số bộ test, rồi chạy luôn — không hỏi xác
    nhận.
 2. Nó khởi chạy Chrome (bạn sẽ thấy một cửa sổ mở ra, trừ khi bạn đã
    sửa code để chạy ở chế độ headless) và điều khiển nó đi tới đúng
@@ -140,11 +138,12 @@ deactivate
 
 ## Xử lý sự cố
 
-- **"Chrome not found"** — set `CHROME_PATH` thành đường dẫn đầy đủ tới
-  file thực thi Chrome của bạn trước khi chạy, ví dụ:
+- **"Chrome not found"** — set `CHROME_PATH` trong `.env` thành đường
+  dẫn đầy đủ tới file thực thi Chrome, theo đúng OS của máy bạn:
   ```bash
-  export CHROME_PATH="/usr/bin/google-chrome-stable"   # Linux
-  python run_test.py
+  CHROME_PATH=/usr/bin/google-chrome-stable                                    # Linux
+  CHROME_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome     # macOS
+  CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe           # Windows
   ```
 - **Timeout / không có token sau một thời gian chờ dài** — hệ thống
   chấm điểm rủi ro (risk scoring) của Turnstile trên trang mục tiêu có

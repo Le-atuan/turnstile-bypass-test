@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-One-off: drive the real UI with undetected-chromedriver, but hook
-fetch/XHR before anything else loads so we capture the EXACT request
-(url, method, headers, body, cookies) the real page sends for the
-lookup — so run_test.py's raw-HTTP step can replicate it faithfully.
-
+One-off: hooks fetch/XHR on the real page to capture the exact lookup
+request (url, method, headers, body, cookies) for run_test.py to replicate.
 Only run against infrastructure you own or are authorized to test.
 """
 import json
@@ -28,7 +25,7 @@ from solver_uc import _installed_chrome_major
 
 SITEURL = os.environ.get("TARGET_SITEURL", "https://tracuu.einvoice365.com/").strip()
 TEST_CASES = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
-tax_code, lookup_code = TEST_CASES[0]["tax_code"], TEST_CASES[0]["lookup_code"]
+tax_code, lookup_code = TEST_CASES[0]["info"]["tax_code"], TEST_CASES[0]["info"]["lookup_code"]
 
 HOOK_JS = """
 window.__captured = [];
@@ -113,12 +110,10 @@ try:
     driver.get(SITEURL)
     driver.execute_script(HOOK_JS)
 
-    print("[capture] waiting for turnstile token...")
     deadline = time.time() + 20
     while time.time() < deadline:
         val = driver.execute_script("return document.querySelector('[name=\"cf-turnstile-response\"]')?.value || '';")
         if val:
-            print(f"[capture] token ready: {val[:24]}...")
             break
         time.sleep(0.5)
 
@@ -132,21 +127,14 @@ try:
     rect = find_button_rect(driver, "search:btnsearch", "Tra cứu")
     click_rect(driver, rect)
 
-    print("[capture] waiting for the request to fire...")
     time.sleep(5)
 
     captured = json.loads(driver.execute_script("return JSON.stringify(window.__captured || []);"))
     cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
 
-    print("\n=== CAPTURED REQUESTS ===")
-    for req in captured:
-        print(json.dumps(req, indent=2, ensure_ascii=False))
-    print("\n=== COOKIES ===")
-    print(json.dumps(cookies, indent=2))
-
     with open("captured_request.json", "w", encoding="utf-8") as f:
         json.dump({"requests": captured, "cookies": cookies}, f, indent=2, ensure_ascii=False)
-    print("\n[capture] saved to captured_request.json")
+    print(f"[capture] {len(captured)} request(s) saved to captured_request.json")
 
 finally:
     driver.quit()

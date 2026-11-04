@@ -73,25 +73,25 @@ Open `.env` in an editor and check/fill:
 - Leave `VERIFY_ENDPOINT` blank if you only want to test whether a token
   can be obtained at all, without touching the lookup endpoint.
 
-`run_ui_test_uc.py` / `run_ui_test.py` still read their test cases from
-`TEST_CASES` in `.env`; `run_test.py` (step 5 below) does not.
-
 ## 5. List the test cases for `run_test.py`
 
-`run_test.py` loads its tax_code/lookup_code pairs from a JSON file, not
-`.env`. Create `test_cases.json` in the project root:
+`run_test.py` loads its tax_code/lookup_code pairs from `test_cases.json`
+if that file exists, otherwise it falls back to `TEST_CASES` in `.env`.
+Either way, each entry must be in the same `result_json` shape
+`get_file()` expects:
 
 ```json
 [
-  {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"},
-  {"tax_code": "0400495597", "lookup_code": "mr3pye3m65"}
+  {"info": {"tax_code": "0314218920", "lookup_code": "j5nnm3lzo5"}},
+  {"info": {"tax_code": "0400495597", "lookup_code": "mr3pye3m65"}}
 ]
 ```
 
-Extra fields (`invoice_no`, `document_id`, ...) are ignored if present, so
-you can paste a larger export as-is. Pairs already recorded in
-`logs/downloaded.json` (from a past successful run) are skipped
-automatically, even across different `--cases` files.
+For a quick/local run, just edit `TEST_CASES` in `.env` — no file needed.
+For a larger or one-off batch, create `test_cases.json` (or pass
+`--cases /path/to/file.json`); it takes priority over `.env` when present.
+Pairs already recorded in `logs/downloaded.json` (from a past successful
+run) are skipped automatically either way.
 
 ## 6. Run the test
 
@@ -101,9 +101,8 @@ python run_test.py --cases /path/to/your_file.json  # or a file of your own — 
 ```
 
 What happens:
-1. The script prints the target URL and **asks you to type `y` to
-   confirm you're authorized to test it** — nothing touches the network
-   before you confirm.
+1. The script logs the target URL and test case count, then runs
+   unattended — no confirmation prompt.
 2. It launches Chrome (you'll see a window open, unless you've modified
    the code to run headless) and drives it to the real target page.
 3. It waits for EzSolver to pull a Turnstile token out of the page.
@@ -136,11 +135,12 @@ deactivate
 
 ## Troubleshooting
 
-- **"Chrome not found"** — set `CHROME_PATH` to your Chrome executable's
-  full path before running, e.g.:
+- **"Chrome not found"** — set `CHROME_PATH` in `.env` to your Chrome
+  executable's full path:
   ```bash
-  export CHROME_PATH="/usr/bin/google-chrome-stable"   # Linux
-  python run_test.py
+  CHROME_PATH=/usr/bin/google-chrome-stable                                    # Linux
+  CHROME_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome     # macOS
+  CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe           # Windows
   ```
 - **Timeout / no token after a long wait** — the target's Turnstile risk
   scoring may be flagging the automated browser itself (common on

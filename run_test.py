@@ -44,22 +44,16 @@ VERIFY_METHOD = os.environ.get("VERIFY_METHOD", "POST").strip().upper()
 VERIFY_TOKEN_FIELD = os.environ.get("VERIFY_TOKEN_FIELD", "cf-turnstile-response").strip()
 VERIFY_EXTRA_FIELDS = json.loads(os.environ.get("VERIFY_EXTRA_FIELDS", "{}") or "{}")
 
-# Test cases come from a JSON file, not .env — default path below, or pass
-# --cases <path> to use a different file. Format: a JSON list of
-# {"tax_code": "...", "lookup_code": "..."} objects; extra fields
-# (invoice_no, document_id, ...) are ignored if present.
+# JSON list of result_json-shaped {"info": {"tax_code", "lookup_code"}} objects, not read from .env.
 DEFAULT_TEST_CASES_FILE = "test_cases.json"
 
-_cli = argparse.ArgumentParser()
-_cli.add_argument("--cases", default=DEFAULT_TEST_CASES_FILE,
-                   help=f"Path to the JSON file of test cases (default: {DEFAULT_TEST_CASES_FILE})")
-TEST_CASES_FILE = _cli.parse_args().cases
 
-if os.path.isfile(TEST_CASES_FILE):
-    with open(TEST_CASES_FILE, "r", encoding="utf-8") as f:
-        TEST_CASES = json.load(f)
-else:
-    TEST_CASES = []
+def load_test_cases_file(path: str) -> list:
+    """Loads a JSON list of result_json-shaped test cases from disk; [] if the file doesn't exist."""
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))  # retries on technical failure only
 SOLVER_BACKEND = os.environ.get("SOLVER_BACKEND", "uc").strip()  # nodriver | uc
@@ -82,13 +76,13 @@ OUTCOME_ERROR = "error"          # token acquisition or HTTP request itself fail
 OUTCOME_SKIPPED = "skipped"      # XML already downloaded in a previous run
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "").strip() or os.path.join(LOG_DIR, "xmls")
 RUN_STAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 LOG_FILE = os.path.join(LOG_DIR, f"run_test_{RUN_STAMP}.log")
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Tracks pairs whose XML was already downloaded in any past run — survives
-# `clear_xmls.sh` deleting the actual XML files, since it's a separate record.
+# Survives clear_xmls.sh deleting the XML files themselves.
 DOWNLOADED_FILE = os.path.join(LOG_DIR, "downloaded.json")
 _downloaded_lock = threading.Lock()
 
@@ -129,35 +123,11 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
 
-def log_environment():
-    logger.debug("=== Environment ===")
-    logger.debug("Python: %s", sys.version.replace("\n", " "))
-    logger.debug("TARGET_SITEURL=%s", SITEURL)
-    logger.debug("TARGET_SITEKEY=%s", SITEKEY)
-    logger.debug("VERIFY_ENDPOINT=%s", VERIFY_ENDPOINT)
-    logger.debug("VERIFY_METHOD=%s", VERIFY_METHOD)
-    logger.debug("MAX_ATTEMPTS=%s", MAX_ATTEMPTS)
-    logger.debug("NOT_FOUND_KEYWORDS=%s", NOT_FOUND_KEYWORDS)
-    logger.debug("TEST_CASES count=%s (source: %s)", len(TEST_CASES), TEST_CASES_FILE)
-    logger.debug("===================")
-
-
-def require_own_site_ack():
-    logger.info("=" * 70)
-    logger.info("This harness will drive a real browser + raw HTTP requests against:")
-    logger.info("    %s", SITEURL)
+def require_own_site_ack(total_cases: int):
     logger.info(
-        "It will run %s test case(s), retrying up to %s time(s) per case on "
-        "TECHNICAL failure only (not on 'not found' or a rejected response).",
-        len(TEST_CASES), MAX_ATTEMPTS,
+        "Target: %s (%s test case(s), MAX_ATTEMPTS=%s). Authorized to test — proceeding.",
+        SITEURL, total_cases, MAX_ATTEMPTS,
     )
-    logger.info("Only run this against a site you own or are authorized to test.")
-    logger.info("=" * 70)
-    ans = input("Confirm you are authorized to test this target [y/N]: ").strip().lower()
-    logger.debug("Authorization prompt answered: %r", ans)
-    if ans != "y":
-        logger.info("Aborted.")
-        sys.exit(1)
 
 
 def _load_solve_fn():
@@ -171,17 +141,13 @@ def _load_solve_fn():
 def step1_solve_token(run_label: str):
     solve = _load_solve_fn()
 
-    logger.info("[1/2] Requesting a Turnstile token (backend=%s) for sitekey=%r ...", SOLVER_BACKEND, SITEKEY)
     t0 = time.time()
     token = solve(SITEKEY, SITEURL, timeout=60)
-    elapsed = round(time.time() - t0, 2)
-    logger.info("      -> solver obtained a token in %ss", elapsed)
-    logger.debug("Run %s: token (truncated): %s...", run_label, token[:24])
+    logger.debug("Run %s: token obtained in %ss", run_label, round(time.time() - t0, 2))
     return token
 
 
 def step2_verify_with_backend(token: str, tax_code: str, lookup_code: str):
-    logger.info("[2/2] Submitting token to your backend: %s %s", VERIFY_METHOD, VERIFY_ENDPOINT)
     payload = {
         "mst": tax_code,
         "sec": lookup_code,
@@ -195,23 +161,18 @@ def step2_verify_with_backend(token: str, tax_code: str, lookup_code: str):
     else:
         resp = requests.post(VERIFY_ENDPOINT, json=payload, timeout=30)
 
-    logger.info("      -> HTTP %s", resp.status_code)
-    snippet = resp.text[:300].replace("\n", " ")
-    logger.info("      -> response (truncated): %s", snippet)
+    logger.debug("      -> HTTP %s: %s", resp.status_code, resp.text[:300].replace("\n", " "))
     return resp
 
 
 def already_downloaded(tax_code: str, lookup_code: str) -> bool:
-    """True if an XML for this pair was already saved by a previous run,
-    per logs/downloaded.json (independent of whether the XML file still exists)."""
+    """True if this pair is recorded in logs/downloaded.json."""
     return _pair_key(tax_code, lookup_code) in load_downloaded()
 
 
 def save_xml(run_label: str, tax_code: str, lookup_code: str, xml_content: str, out_dir: str = None) -> str:
-    """Saves the XML extracted from the api/search response's own `xml` field
-    (the real page never makes a second HTTP call for it — see portal.js:
-    the "Tải XML" button just Blob()s this same field). Returns the file path."""
-    xml_dir = out_dir or os.path.join(LOG_DIR, "xmls")
+    """Writes the response's `xml` field to disk and returns the file path."""
+    xml_dir = out_dir or DOWNLOAD_DIR
     os.makedirs(xml_dir, exist_ok=True)
     safe_label = run_label.replace("/", "-").replace(" ", "_").replace("(", "").replace(")", "")
     path = os.path.join(xml_dir, f"invoice_{tax_code}_{lookup_code}_{safe_label}.xml")
@@ -220,15 +181,23 @@ def save_xml(run_label: str, tax_code: str, lookup_code: str, xml_content: str, 
     return path
 
 
+def extract_pair(result_json: dict) -> tuple:
+    """Pulls (tax_code, lookup_code) out of a result_json["info"]; raises KeyError/TypeError if malformed."""
+    return result_json["info"]["tax_code"], result_json["info"]["lookup_code"]
+
+
+def download_xml(run_label: str, tax_code: str, lookup_code: str, xml_content: str, download_dir: str = None) -> str:
+    """Saves the XML and records the pair as downloaded; shared final step for get_file and run_once."""
+    path = save_xml(run_label, tax_code, lookup_code, xml_content, out_dir=download_dir)
+    mark_downloaded(tax_code, lookup_code)
+    return path
+
+
 def get_file(result_json: dict, download_dir: str = None) -> dict:
-    """Same input/output shape as GetFolderTraCuuEinvoice365.get_file (the
-    Cloudflare-blocked browser-form approach a colleague tried) — swap one
-    for the other in callers. Backed by the raw-HTTP Turnstile bypass, which
-    has no PDF step, so file_pdf is always None."""
+    """Drop-in replacement for GetFolderTraCuuEinvoice365.get_file; file_pdf is always None."""
     dict_result = {"file_pdf": None, "file_xml": None}
     try:
-        tax_code = result_json["info"]["tax_code"]
-        lookup_code = result_json["info"]["lookup_code"]
+        tax_code, lookup_code = extract_pair(result_json)
     except (KeyError, TypeError):
         return dict_result
 
@@ -241,17 +210,13 @@ def get_file(result_json: dict, download_dir: str = None) -> dict:
         return dict_result
 
     if xml_content:
-        dict_result["file_xml"] = save_xml(run_label, tax_code, lookup_code, xml_content, out_dir=download_dir)
-        mark_downloaded(tax_code, lookup_code)
+        dict_result["file_xml"] = download_xml(run_label, tax_code, lookup_code, xml_content, download_dir)
 
     return dict_result
 
 
 def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
-    """Run one test case. Returns accepted / rejected / not_found / error.
-    `accepted` only when the XML was actually extracted and saved to disk —
-    a bypass that gets a 2xx with no usable XML is not a successful test."""
-    logger.info("\n--- Run %s (tax_code=%s, lookup_code=%s) ---", run_label, tax_code, lookup_code)
+    """Runs one test case; `accepted` only when the XML was actually saved."""
     t0 = time.time()
 
     try:
@@ -296,8 +261,7 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
                        "(%ss). Bypass alone isn't a successful test.", run_label, elapsed)
         return OUTCOME_REJECTED
 
-    xml_path = save_xml(run_label, tax_code, lookup_code, xml_content)
-    mark_downloaded(tax_code, lookup_code)
+    xml_path = download_xml(run_label, tax_code, lookup_code, xml_content, DOWNLOAD_DIR)
     logger.info("Run %s RESULT: ACCEPTED — XML saved to %s (%ss). Final — not retried.",
                 run_label, xml_path, elapsed)
     return OUTCOME_ACCEPTED
@@ -326,33 +290,35 @@ def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> str:
     return OUTCOME_ERROR
 
 
-def main():
+def run_test_cases(test_cases: list) -> list:
+    """Runs every result_json-shaped entry in test_cases and returns the list of outcomes.
+
+    The entry point for integrating this harness into another project: build
+    `test_cases` however you like (e.g. from your own API call) as a list of
+    {"info": {"tax_code": "...", "lookup_code": "..."}} dicts, then call this
+    directly — no CLI args, no test_cases.json file needed.
+    """
     logger.debug("Log file for this run: %s", LOG_FILE)
-    log_environment()
 
     if not SITEURL or not SITEKEY:
         logger.error("Set TARGET_SITEURL and TARGET_SITEKEY in .env first (see .env.example).")
-        sys.exit(1)
-    if not TEST_CASES:
-        logger.error(
-            "No test cases loaded from %s — create it (or pass --cases <path>) "
-            'as a JSON list of {"tax_code": "...", "lookup_code": "..."} objects, one per run.',
-            TEST_CASES_FILE,
-        )
-        sys.exit(1)
+        return []
+    if not test_cases:
+        logger.error("No test cases given.")
+        return []
 
-    require_own_site_ack()
+    require_own_site_ack(len(test_cases))
 
-    total = len(TEST_CASES)
+    total = len(test_cases)
     jobs = []  # (index, tax_code, lookup_code) for well-formed, not-yet-downloaded cases
     results = [None] * total
-    for i, case in enumerate(TEST_CASES, start=1):
+    for i, case in enumerate(test_cases, start=1):
         try:
-            tax_code, lookup_code = case["tax_code"], case["lookup_code"]
+            tax_code, lookup_code = extract_pair(case)
         except (KeyError, TypeError):
             logger.error(
-                "TEST_CASES entry %d is malformed (expected keys 'tax_code' "
-                "and 'lookup_code'): %r", i, case
+                "TEST_CASES entry %d is malformed (expected result_json shape "
+                '{"info": {"tax_code", "lookup_code"}}): %r', i, case
             )
             results[i - 1] = OUTCOME_ERROR
             continue
@@ -385,27 +351,36 @@ def main():
     errored = results.count(OUTCOME_ERROR)
     skipped = results.count(OUTCOME_SKIPPED)
 
-    logger.info("\n" + "=" * 70)
-    logger.info("SUMMARY")
-    logger.info("=" * 70)
     logger.info(
-        "%d/%d accepted | %d/%d rejected | %d/%d not found | %d/%d technical error | %d/%d skipped (already downloaded)",
+        "SUMMARY: %d/%d accepted | %d/%d rejected | %d/%d not found | %d/%d error | %d/%d skipped",
         accepted, total, rejected, total, not_found, total, errored, total, skipped, total,
     )
-    if accepted:
-        logger.info("\n-> Some tokens obtained this way WERE accepted by your backend.")
-        logger.info("   Treat Turnstile as one layer only. Add server-side defenses:")
-        logger.info("   rate limiting, anomaly detection on request patterns, and")
-        logger.info("   re-verifying the token with Cloudflare's siteverify API per request.")
-    if rejected:
-        logger.info("\n-> Some requests were rejected by your backend. Good — investigate why")
-        logger.info("   (token replay check, extra required fields, session binding, etc.)")
-        logger.info("   so you understand which control is actually doing the work.")
     if errored:
-        logger.info(
-            "\nSome cases hit technical errors even after retries — see the full "
-            "log for tracebacks:\n    %s", LOG_FILE
+        logger.info("See %s for tracebacks on the %d error(s).", LOG_FILE, errored)
+
+    return results
+
+
+def main():
+    """CLI entry point: --cases <path> file if given/present, else TEST_CASES from .env."""
+    cli = argparse.ArgumentParser()
+    cli.add_argument("--cases", default=DEFAULT_TEST_CASES_FILE,
+                      help=f"Path to the JSON file of test cases (default: {DEFAULT_TEST_CASES_FILE}, "
+                           "else falls back to TEST_CASES in .env)")
+    cases_file = cli.parse_args().cases
+
+    test_cases = load_test_cases_file(cases_file)
+    if not test_cases:
+        test_cases = json.loads(os.environ.get("TEST_CASES", "[]") or "[]")
+    if not test_cases:
+        logger.error(
+            "No test cases found — create %s, pass --cases <path>, or set TEST_CASES in .env, "
+            'as a JSON list of {"info": {"tax_code": "...", "lookup_code": "..."}} objects.',
+            cases_file,
         )
+        sys.exit(1)
+
+    run_test_cases(test_cases)
 
 
 if __name__ == "__main__":
