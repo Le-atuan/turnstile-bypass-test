@@ -244,7 +244,16 @@ Recon xác nhận trang được dựng bằng **Webix**, không phải React/Vu
   đó là lý do chính đáng để ưu tiên click bằng tọa độ thật thay vì
   `element.click()` để đảm bảo độ tin cậy. (Lưu ý riêng: đây có vẻ là
   một bug thật trên tính năng "Tải XML" của site, đáng báo lại cho team
-  dev, không liên quan tới việc test Turnstile.)
+  dev, không liên quan tới việc test Turnstile.) `run_ui_test.py` giờ
+  cũng click nút này mỗi khi nó hiện ra sau khi tra cứu — xem
+  `maybe_click_download_xml()`. Hàm này hook `window.open()` và
+  `URL.createObjectURL()` ngay trước khi click, để mỗi lần chạy đều cho
+  ra câu trả lời mới, có kiểm chứng bằng script, cho câu hỏi "cú click
+  NÀY có làm gì không" (có mở tab mới? có tạo blob file mới?), thay vì
+  chỉ dựa vào lần kiểm tra thủ công ở trên. Bước này chỉ mang tính thông
+  tin: không bao giờ ảnh hưởng tới kết quả `success`/`not_found`/`error`
+  của lần chạy, vì nó phụ, không phải trọng tâm của bài test
+  Turnstile/tra cứu.
 - Các element kết quả (`search:status` — banner trạng thái có màu, ví
   dụ màu xanh "Hóa đơn có hiệu lực" khi hóa đơn hợp lệ — `search:btnxml`,
   và `search:ipdf`, một PDF viewer nhúng hiển thị đúng nội dung hóa đơn)

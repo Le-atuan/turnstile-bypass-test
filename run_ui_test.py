@@ -44,6 +44,12 @@ that function. It only reuses EzSolver's browser-launch helpers
      the page body if that lookup fails for any reason) so you can see
      whether the lookup succeeded, failed, or the page reacted as if it
      detected automation.
+  6. If the "Tải XML" button (search:btnxml) is visible after the
+     lookup, clicks it too (best-effort, never affects the run's
+     success/failure outcome) and reports whether a new tab or file blob
+     resulted — see maybe_click_download_xml(). Recon's manual test
+     found no click handler bound on this button at all; this step gives
+     you a fresh, scripted data point on that each time you run it.
 
 PARTIALLY VALIDATED AGAINST REAL RECON (2 live lookups performed
 manually, one succeeded end-to-end), but this script itself has NOT been
@@ -258,6 +264,111 @@ async def click_submit_button(page):
     await page.mouse_click(cx, cy)
 
 
+async def maybe_click_download_xml(page, run_label: str):
+    """Best-effort: if the 'Tải XML' button (search:btnxml) is visible
+    after a lookup, click it via the same Webix view-id + real mouse
+    click technique as the submit button.
+
+    Recon's manual test found this button has NO click handler bound at
+    all (no network request, no download, no console output resulted) —
+    so this click is expected, based on that earlier check, to do
+    nothing observable. It's attempted anyway on request, with a small
+    probe hooked into window.open()/URL.createObjectURL() just before
+    clicking, so each run reports a fresh, scripted data point instead of
+    relying solely on the earlier manual observation.
+
+    This NEVER affects the run's outcome (success/not_found/error) — any
+    failure here is caught and logged as a warning only, since it's
+    purely informational and secondary to the actual Turnstile/lookup
+    test.
+    """
+    try:
+        visible = await page.evaluate("""
+            (() => {
+                if (typeof webix === 'undefined') return false;
+                const v = webix.$$('search:btnxml');
+                return !!(v && v.isVisible && v.isVisible());
+            })()
+        """)
+    except Exception as exc:
+        logger.warning("Run %s: could not check 'Tải XML' visibility (non-fatal): %s", run_label, exc)
+        return
+
+    if not visible:
+        logger.debug("Run %s: 'Tải XML' button not visible — nothing to click.", run_label)
+        return
+
+    logger.info(
+        "Run %s: 'Tải XML' button is visible — clicking it (best-effort; "
+        "recon found no handler bound as of the last manual check)...", run_label
+    )
+
+    try:
+        rect = await page.evaluate("""
+            (() => {
+                const v = webix.$$('search:btnxml');
+                if (!v || !v.$view) return null;
+                const el = v.$view.querySelector('button') || v.$view;
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return null;
+                return {x: r.x, y: r.y, w: r.width, h: r.height};
+            })()
+        """)
+        if not rect:
+            logger.warning(
+                "Run %s: 'Tải XML' button reported visible but its bounding "
+                "rect could not be read — skipping the click.", run_label
+            )
+            return
+
+        # Hook window.open()/URL.createObjectURL() right before clicking, so
+        # we can report whether THIS click produced a new tab or blob —
+        # matches what recon checked manually.
+        await page.evaluate("""
+            (() => {
+                window.__xmlClickProbe = {opened: false, blobUrl: null};
+                if (window.__xmlClickHooked) return;
+                window.__xmlClickHooked = true;
+                const origOpen = window.open;
+                window.open = function(...args) {
+                    window.__xmlClickProbe.opened = true;
+                    return origOpen.apply(window, args);
+                };
+                const origCreateObjectURL = URL.createObjectURL;
+                URL.createObjectURL = function(obj) {
+                    const url = origCreateObjectURL.call(URL, obj);
+                    window.__xmlClickProbe.blobUrl = url;
+                    return url;
+                };
+            })()
+        """)
+
+        cx = rect["x"] + rect["w"] / 2 + random.uniform(-3, 3)
+        cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
+        await page.mouse_move(cx - 30, cy - 8)
+        await asyncio.sleep(random.uniform(0.15, 0.3))
+        await page.mouse_move(cx, cy)
+        await asyncio.sleep(random.uniform(0.08, 0.2))
+        await page.mouse_click(cx, cy)
+
+        await asyncio.sleep(2)  # give any resulting navigation/download a moment
+
+        probe = await page.evaluate("window.__xmlClickProbe || {}")
+        logger.info(
+            "Run %s: 'Tải XML' click result — window.open() called: %s, new "
+            "blob URL created: %s. If both are false, this matches recon's "
+            "earlier finding that the button has no bound handler. (A blob "
+            "URL belonging to the PDF viewer from an EARLIER step would not "
+            "show up here — only a blob created by THIS click is hooked.)",
+            run_label, probe.get("opened"), bool(probe.get("blobUrl")),
+        )
+        if probe.get("blobUrl"):
+            logger.debug("Run %s: new blob URL from 'Tải XML' click: %s", run_label, probe.get("blobUrl"))
+    except Exception as exc:
+        logger.warning("Run %s: error while clicking 'Tải XML' (non-fatal, doesn't affect test result): %s", run_label, exc)
+        logger.debug("Traceback:\n%s", traceback.format_exc())
+
+
 async def wait_for_result(page, timeout: int) -> bool:
     """Poll Webix's result-status view (search:status) until it becomes
     visible. Recon confirmed this banner (not just any DOM change) is
@@ -459,6 +570,8 @@ async def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
 
         logger.info("Result content (first 600 chars):")
         logger.info(body_text)
+
+        await maybe_click_download_xml(page, run_label)
 
         elapsed = round(time.time() - t0, 2)
         lowered = (body_text or "").lower()

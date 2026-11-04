@@ -227,7 +227,15 @@ matters for automation:
   coordinate-based click over `element.click()` for reliability.
   (Separately: this looks like a possible bug on the site's "Tải XML"
   feature itself, worth flagging to the dev team independently of
-  Turnstile testing.)
+  Turnstile testing.) `run_ui_test.py` now clicks this button too, on
+  request, whenever it's visible after a lookup — see
+  `maybe_click_download_xml()`. It hooks `window.open()` and
+  `URL.createObjectURL()` right before the click so each run reports a
+  fresh, scripted answer to "did THIS click do anything" (a new tab? a
+  new file blob?) instead of relying only on the one-off manual check
+  above. This step is purely informational: it never affects a run's
+  `success`/`not_found`/`error` outcome, since it's secondary to the
+  actual Turnstile/lookup test.
 - The result elements (`search:status` — the colored outcome banner,
   e.g. green "Hóa đơn có hiệu lực" for a valid invoice — `search:btnxml`,
   and `search:ipdf`, an embedded PDF viewer showing the actual invoice)
