@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,12 +61,38 @@ OUTCOME_ACCEPTED = "accepted"    # backend 2xx
 OUTCOME_REJECTED = "rejected"    # backend non-2xx
 OUTCOME_NOT_FOUND = "not_found"  # matched a "not found" phrase
 OUTCOME_ERROR = "error"          # token acquisition or HTTP request itself failed
+OUTCOME_SKIPPED = "skipped"      # XML already downloaded in a previous run
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 RUN_STAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 LOG_FILE = os.path.join(LOG_DIR, f"run_test_{RUN_STAMP}.log")
 
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# Tracks pairs whose XML was already downloaded in any past run — survives
+# `clear_xmls.sh` deleting the actual XML files, since it's a separate record.
+DOWNLOADED_FILE = os.path.join(LOG_DIR, "downloaded.json")
+_downloaded_lock = threading.Lock()
+
+
+def _pair_key(tax_code: str, lookup_code: str) -> str:
+    return f"{tax_code}|{lookup_code}"
+
+
+def load_downloaded() -> set:
+    try:
+        with open(DOWNLOADED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except (FileNotFoundError, ValueError):
+        return set()
+
+
+def mark_downloaded(tax_code: str, lookup_code: str) -> None:
+    with _downloaded_lock:
+        downloaded = load_downloaded()
+        downloaded.add(_pair_key(tax_code, lookup_code))
+        with open(DOWNLOADED_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(downloaded), f, ensure_ascii=False, indent=2)
 
 logger = logging.getLogger("run_test")
 logger.setLevel(logging.DEBUG)
@@ -156,6 +183,12 @@ def step2_verify_with_backend(token: str, tax_code: str, lookup_code: str):
     return resp
 
 
+def already_downloaded(tax_code: str, lookup_code: str) -> bool:
+    """True if an XML for this pair was already saved by a previous run,
+    per logs/downloaded.json (independent of whether the XML file still exists)."""
+    return _pair_key(tax_code, lookup_code) in load_downloaded()
+
+
 def save_xml(run_label: str, tax_code: str, lookup_code: str, xml_content: str) -> str:
     """Saves the XML extracted from the api/search response's own `xml` field
     (the real page never makes a second HTTP call for it — see portal.js:
@@ -219,6 +252,7 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
         return OUTCOME_REJECTED
 
     xml_path = save_xml(run_label, tax_code, lookup_code, xml_content)
+    mark_downloaded(tax_code, lookup_code)
     logger.info("Run %s RESULT: ACCEPTED — XML saved to %s (%ss). Final — not retried.",
                 run_label, xml_path, elapsed)
     return OUTCOME_ACCEPTED
@@ -264,17 +298,26 @@ def main():
     require_own_site_ack()
 
     total = len(TEST_CASES)
-    jobs = []  # (index, tax_code, lookup_code) for well-formed cases
+    jobs = []  # (index, tax_code, lookup_code) for well-formed, not-yet-downloaded cases
     results = [None] * total
     for i, case in enumerate(TEST_CASES, start=1):
         try:
-            jobs.append((i, case["tax_code"], case["lookup_code"]))
+            tax_code, lookup_code = case["tax_code"], case["lookup_code"]
         except (KeyError, TypeError):
             logger.error(
                 "TEST_CASES entry %d is malformed (expected keys 'tax_code' "
                 "and 'lookup_code'): %r", i, case
             )
             results[i - 1] = OUTCOME_ERROR
+            continue
+        if already_downloaded(tax_code, lookup_code):
+            logger.info(
+                "Run %d/%d: SKIPPED — XML already in logs/xmls/ for tax_code=%s, lookup_code=%s.",
+                i, total, tax_code, lookup_code,
+            )
+            results[i - 1] = OUTCOME_SKIPPED
+            continue
+        jobs.append((i, tax_code, lookup_code))
 
     if MAX_WORKERS > 1:
         logger.info("Running %d test case(s) with up to %d concurrent browsers...", len(jobs), MAX_WORKERS)
@@ -294,13 +337,14 @@ def main():
     rejected = results.count(OUTCOME_REJECTED)
     not_found = results.count(OUTCOME_NOT_FOUND)
     errored = results.count(OUTCOME_ERROR)
+    skipped = results.count(OUTCOME_SKIPPED)
 
     logger.info("\n" + "=" * 70)
     logger.info("SUMMARY")
     logger.info("=" * 70)
     logger.info(
-        "%d/%d accepted | %d/%d rejected | %d/%d not found | %d/%d technical error",
-        accepted, total, rejected, total, not_found, total, errored, total,
+        "%d/%d accepted | %d/%d rejected | %d/%d not found | %d/%d technical error | %d/%d skipped (already downloaded)",
+        accepted, total, rejected, total, not_found, total, errored, total, skipped, total,
     )
     if accepted:
         logger.info("\n-> Some tokens obtained this way WERE accepted by your backend.")
