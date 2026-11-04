@@ -2,82 +2,89 @@
 
 # turnstile-bypass-test
 
-Tổng quan dự án kiểm thử phòng thủ: liệu các công cụ giải Turnstile
-mã nguồn mở có lấy được token hợp lệ cho trang tra cứu hóa đơn của chúng
-ta không, và quan trọng hơn — **backend của chúng ta còn chặn được gì sau
-khi token đã được chấp nhận hay không.**
+Tổng quan dự án kiểm thử phòng thủ: các công cụ giải Turnstile mã nguồn
+mở có lấy được token hợp lệ cho trang tra cứu hóa đơn của chúng ta
+không, và quan trọng hơn — **backend của chúng ta còn thực thi (enforce)
+được điều gì sau khi token đó đã được chấp nhận hay không.**
 
 **Chỉ chạy nhằm vào `tracuu.einvoice365.com` (hoặc hạ tầng khác do chúng
-ta sở hữu) — không nhằm vào site của bên thứ ba.**
+ta sở hữu) — không bao giờ nhằm vào site của bên thứ ba.**
 
-## Mục tiêu & bối cảnh kỹ thuật của trang
+## Bối cảnh mục tiêu
 
 - **Trang:** FPT eInvoice — `https://tracuu.einvoice365.com/`
 - **Widget:** Cloudflare Turnstile, **chế độ managed/invisible** — không
-  hiện checkbox/puzzle, tự giải trong nền (~1-2s). Nút "Tra cứu" bị khóa
-  cho tới khi token sẵn sàng.
+  hiện checkbox/puzzle, tự giải trong nền (~1-2 giây). Nút "Tra cứu" vẫn
+  bị khóa (disabled) cho tới khi token sẵn sàng.
 - **Site key:** `0x4AAAAAACA6lZiDGKBtjbxg`
 - **Token field:** input ẩn `name="cf-turnstile-response"`
-- **Endpoint tra cứu nghi vấn** (đọc từ `portal.js`, chưa xác nhận cấu
-  trúc request thật): `/ptop/psearch`, `/ptopnew/psearch`,
+- **Các endpoint tra cứu nghi vấn** (đọc được từ `portal.js`, cấu trúc
+  request thật chưa được xác nhận): `/ptop/psearch`, `/ptopnew/psearch`,
   `/ptopnew/pcussearch`, `/api/inv/minutes/param`
-- Không phát hiện lớp chống bot khác (không reCAPTCHA/hCaptcha/captcha
-  ảnh, không trang chặn toàn màn hình của Cloudflare). Turnstile là lớp
-  duy nhất nhìn thấy được.
+- Không quan sát thấy lớp chống bot khác (không reCAPTCHA/hCaptcha/
+  captcha ảnh, không có trang chặn toàn màn hình của Cloudflare).
+  Turnstile là lớp duy nhất nhìn thấy được.
 
-**Ý nghĩa:** vì widget chạy ẩn và tự giải không cần tương tác, bất kỳ
-solver nào load được trang và chờ callback đều lấy được token — không cần
-giả lập click. Vậy lớp phòng thủ thật phải nằm ở backend (chống replay,
-rate limit, verify lại với Cloudflare), không nằm ở cách widget tương tác.
-Đây chính là điều mỗi nhánh dưới đây đo lường.
+**Ý nghĩa:** vì widget chạy ẩn (invisible) và tự giải mà không cần
+tương tác, bất kỳ solver nào load được trang và chờ callback đều lấy
+được token — không cần giả lập click. Lớp phòng thủ thật sự phải nằm ở
+backend (chống replay, rate limiting, verify lại với Cloudflare), không
+nằm ở cách widget tương tác. Đây chính xác là điều mỗi nhánh dưới đây
+đo lường.
 
-## Repo được tích hợp & so sánh
+## Các repo được tích hợp & so sánh
 
-Repo gốc nằm trong một khảo sát rộng hơn các tool "Cloudflare Turnstile
-bypass" trên GitHub. Tạm chọn 2 repo để tích hợp thực tế, vì đại diện cho
-hai cách tiếp cận khác nhau:
+Việc này bắt đầu từ một khảo sát rộng hơn về các tool "Cloudflare
+Turnstile bypass" trên GitHub. Hai repo được chọn để tích hợp thực tế,
+vì chúng đại diện cho hai cách tiếp cận khác nhau:
 
-| | [`ezsolver`](../../tree/ezsolver) branch | [`Turnstile-Solver`](../../tree/Turnstile-Solver) branch |
+| | nhánh [`ezsolver`](../../tree/ezsolver) | nhánh [`Turnstile-Solver`](../../tree/Turnstile-Solver) |
 |---|---|---|
 | **Repo gốc** | [ismoiloffS/EzSolver](https://github.com/ismoiloffS/EzSolver) | [Theyka/Turnstile-Solver](https://github.com/Theyka/Turnstile-Solver) |
-| **Ngôn ngữ / engine** | Python + `nodriver` (CDP thuần, không qua Playwright) | Python + `patchright` (Playwright đã patch để né fingerprint) |
-| **Cách lấy token** | Load **đúng trang thật** của mình, chờ widget tự giải qua callback JS, click thêm vào iframe nếu cần | Điều hướng tới **URL thật** (để domain-binding của sitekey hợp lệ) nhưng **chặn response và tự chèn HTML giả** chỉ chứa widget — không load trang thật |
-| **Độ sát với thực tế trang** | Cao — JS, DOM, mọi logic phụ trên trang thật đều chạy | Thấp hơn — chỉ kiểm tra sitekey giải được độc lập, không phản ánh JS thật của trang |
-| **License** | MIT | Không thấy LICENSE rõ ràng trong repo — cần cân nhắc nếu dùng lại ngoài phạm vi test |
-| **Yêu cầu hệ thống** | Chrome thật, Xvfb (Linux không GUI) | Trình duyệt do `patchright` quản lý (chromium/chrome/msedge/camoufox), không cần Chrome cài sẵn riêng |
-| **Tốc độ / tài nguyên** | Có bản `service.py` giữ 1 Chrome sống lâu (ít cold-start) — theo README tác giả: ~2-2.2s/lần sau khi warm up | Mỗi lần gọi mở Chrome mới qua `sync_solver` — chậm hơn, nhưng đơn giản, không cần giữ tiến trình nền |
-| **Bảo mật khi tự host** | `service.py` lắng nghe `0.0.0.0`, **không xác thực** — README tự cảnh báo chỉ nên chạy trong mạng tin cậy | Không có service mặc định chạy mở cổng (ta chỉ gọi hàm Python trực tiếp qua `sync_solver`); nếu dùng `main.py`/`api_solver.py` (API server có sẵn trong repo) thì cũng không có xác thực — chưa kiểm tra kỹ |
-| **Phù hợp để đo gì** | Đo khả năng phòng thủ **thực tế** của toàn bộ trang (đúng những gì người dùng/bot thật sẽ gặp) | Đo khả năng phòng thủ của **riêng sitekey/domain-binding**, tách biệt khỏi logic frontend |
-| **Rủi ro khi review mã** | Không thấy flag đáng ngại ngoài cảnh báo "không chịu trách nhiệm" quen thuộc của tác giả | Tương tự — không thấy obfuscation/binary lạ, nhưng do thiếu license nên cẩn trọng hơn nếu định tái sử dụng |
+| **Ngôn ngữ / engine** | Python + `nodriver` (CDP thuần, không qua Playwright) | Python + `patchright` (Playwright đã patch để giảm fingerprinting) |
+| **Cách lấy token** | Load **trang thật** của chúng ta, chờ callback JS riêng của widget, click vào iframe nếu cần | Điều hướng tới **URL thật** (để kiểm tra domain-binding của sitekey vẫn vượt qua được) nhưng **chặn response và tự trả về HTML tối giản của riêng nó** — không bao giờ load trang thật của chúng ta |
+| **Độ trung thực so với trang thật** | Cao — mọi script, DOM element, và logic phụ trên trang thật đều thực sự chạy | Thấp hơn — chỉ chứng minh được riêng sitekey có thể giải được một cách độc lập; không nói lên gì về JS thật của trang chúng ta |
+| **License** | MIT | Không có file LICENSE rõ ràng trong repo — cần cẩn trọng nếu tái sử dụng ngoài phạm vi bài test này |
+| **Yêu cầu hệ thống** | Chrome thật, Xvfb trên Linux không có GUI | Trình duyệt do `patchright` quản lý (chromium/chrome/msedge/camoufox) — không cần cài Chrome riêng |
+| **Tốc độ / tài nguyên** | Có sẵn `service.py` giữ một Chrome luôn "nóng" (ít cold start hơn) — README của tác giả công bố ~2-2.2 giây/lần giải khi đã warm up | Mỗi lần gọi mở một Chrome mới qua `sync_solver` — chậm hơn, nhưng đơn giản hơn, không cần quản lý tiến trình nền |
+| **Rủi ro khi tự host** | `service.py` bind vào `0.0.0.0` và **không có xác thực** — README tự cảnh báo chỉ nên chạy trong mạng tin cậy | Không có service mở cổng nào được dùng ở đây (ta gọi `sync_solver` trực tiếp như một hàm Python); API server riêng của repo (`main.py`/`api_solver.py`) cũng không có xác thực nếu dùng thay thế — không được thực thi trong bài test này |
+| **Thực sự đo được gì** | Phòng thủ **end-to-end (toàn trình)** của trang thật — gần sát nhất với những gì một người dùng hoặc bot thật sẽ gặp phải | Phòng thủ của **riêng sitekey/domain-binding**, tách biệt khỏi logic frontend của chúng ta |
+| **Các điểm đáng chú ý khi review mã** | Không có gì ngoài lời cảnh báo "dùng tùy rủi ro của bạn" thường thấy | Tương tự, không có gì đáng báo động, nhưng việc thiếu license là lý do cần cẩn trọng hơn nếu tái sử dụng ở nơi khác |
 
-### Khuyến nghị đọc kết quả
+### Cách đọc hai kết quả cùng với nhau
 
-- **Chạy `ezsolver` trước** — đây là phép test gần với thực tế người dùng/bot thật nhất.
-- **Chạy `Turnstile-Solver` sau** để biết riêng sitekey có bị giải độc lập dễ không — nếu cả hai đều "accepted" bởi backend thì kết luận chắc hơn là backend thực sự không có lớp chặn thứ hai.
-- Nếu `ezsolver` thất bại nhưng `Turnstile-Solver` thành công (hoặc ngược lại), đó là tín hiệu quý: cho biết lớp phòng thủ nằm ở phía frontend (JS thật trên trang) hay ở chính widget/domain-binding.
+- **Chạy `ezsolver` trước** — đây là kết quả gần sát nhất với một người
+  dùng/bot thật nhằm vào đúng trang thật.
+- **Chạy `Turnstile-Solver` sau** để xem riêng sitekey có dễ giải một
+  cách độc lập không — nếu cả hai cuối cùng đều "được chấp nhận" bởi
+  backend, đó là tín hiệu mạnh hơn cho thấy backend thực sự không có
+  lớp phòng thủ thứ hai.
+- Nếu một bên thành công và bên còn lại thất bại, đó cũng là một tín
+  hiệu có giá trị riêng: nó cho biết lớp phòng thủ nằm ở JS thật của
+  frontend hay nằm ở chính widget/domain-binding.
 
-Các repo khảo sát nhưng chưa tích hợp: `odell0111/turnstile_solver`,
+Các repo khác đã khảo sát nhưng chưa tích hợp: `odell0111/turnstile_solver`,
 `Iruko233/Turnstile-Slip`, `Lucrehulk/cloudflare-turnstile-solver-2026`.
-Có thể thêm nhánh cho chúng sau nếu cần.
+Có thể thêm nhánh cho bất kỳ repo nào trong số này sau, nếu cần.
 
-## Cấu trúc mỗi nhánh solver
+## Cấu trúc của mỗi nhánh solver
 
 ```
 <branch>/
-├── <Solver>/          # vendor nguyên trạng repo gốc
-├── run_test.py        # harness: xin xác nhận quyền → lấy token → gửi backend → báo accepted/rejected
-├── .env.example        # sitekey/URL/endpoint đã điền sẵn giá trị thật đã khảo sát
-├── README.md           # chi tiết kỹ thuật riêng của solver đó
-└── SETUP.md            # hướng dẫn cài & chạy từng bước, có comment giải thích mỗi lệnh
+├── <Solver>/          # repo gốc, vendor nguyên trạng
+├── run_test.py        # harness: xác nhận quyền → lấy token → gửi lên backend → báo cáo accepted/rejected
+├── .env.example        # sitekey/URL/endpoint đã điền sẵn các giá trị mà recon đã xác nhận
+├── README.md / README.vi.md   # chi tiết kỹ thuật của solver đó (EN/VI)
+└── SETUP.md / SETUP.vi.md     # hướng dẫn cài đặt & chạy từng bước, các lệnh có chú thích (EN/VI)
 ```
 
-Sang nhánh tương ứng và đọc `SETUP.md` ở đó để chạy thử — `main` chỉ là
-trang tổng quan, không có code để chạy trực tiếp.
+Chuyển sang nhánh bạn muốn và đọc `SETUP.md` ở đó để thực sự chạy nó —
+`main` chỉ là tổng quan, không có gì ở đây chạy trực tiếp được.
 
-## Đọc kết quả chung (áp dụng cho cả 2 nhánh)
+## Đọc một kết quả (áp dụng cho cả hai nhánh)
 
-| Lấy token | Backend chấp nhận? | Ý nghĩa |
+| Lấy được token | Backend chấp nhận | Ý nghĩa |
 |---|---|---|
-| Thất bại | — | Solver này không lấy được token với cấu hình widget hiện tại. Không chứng minh được với mọi solver khác. |
-| Thành công | Bị từ chối | Turnstile không chặn được solver, nhưng backend có lớp phòng thủ thứ hai thật. Đây là kết quả tốt. |
-| Thành công | Được chấp nhận | Backend coi "có token hợp lệ" là đủ. Cần thêm: verify lại token với API `siteverify` của Cloudflare (chặn tái sử dụng), rate limit theo IP/session, và phát hiện bất thường trên pattern request. |
+| Thất bại | — | Solver này không lấy được token với cấu hình widget hiện tại. Không phải là bằng chứng chống lại mọi solver khác. |
+| Thành công | Bị từ chối | Turnstile một mình không chặn được solver, nhưng backend có một lớp phòng thủ thứ hai thật. Đây là kết quả lành mạnh (healthy). |
+| Thành công | Được chấp nhận | Backend coi "có token hợp lệ" là đủ. Cần bổ sung: verify lại ở phía server bằng `siteverify` kèm cơ chế chống dùng-lại (one-time-use enforcement), rate limiting theo từng IP/session, và phát hiện bất thường (anomaly detection) trên pattern của request. |
