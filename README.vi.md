@@ -12,6 +12,21 @@ hoạt động bên trong, và điều đó có ý nghĩa gì khi đọc kết q
 Lệnh cài đặt/chạy xem tại [`SETUP.md`](SETUP.md) /
 [`SETUP.vi.md`](SETUP.vi.md).
 
+## Hai bài test riêng biệt trong nhánh này
+
+- **`run_test.py`** — lấy token qua `solve_on_page()` của chính EzSolver,
+  sau đó (tùy chọn) gửi thẳng một HTTP POST chứa token đó tới endpoint
+  backend đoán được. Xem phần đọc code và lưu ý quan trọng về việc xóa
+  DOM ở dưới.
+- **`run_ui_test.py`** — một bài test khác, sát thực tế hơn: load đúng
+  trang thật **không sửa đổi gì**, chờ widget Turnstile của chính trang
+  tự giải xong trong nền, rồi gõ tay tax code + lookup code thật vào
+  đúng 2 ô form thật "MST bên bán" / "Mã tra cứu hóa đơn" với độ trễ
+  giống người thật, và bấm đúng nút "Tra cứu" thật — để trả lời câu hỏi
+  "web có detect được bot đang thao tác trên giao diện thật hay không",
+  chứ không chỉ "có lấy được token hay không". Script này chủ động
+  không dùng `solve_on_page()` — xem lý do ở mục dưới.
+
 ## Cách EzSolver lấy được token — đọc qua mã nguồn
 
 EzSolver cung cấp hai điểm vào (entry point) cùng dùng chung phần logic
@@ -27,10 +42,9 @@ thêm một bước gọi HTTP cho chỉ một lần test). Trình tự bên tro
 `solve_on_page()`:
 
 1. **Điều hướng tới URL mục tiêu thật** — `await page.get(siteurl)`.
-   Khác với nhánh `Turnstile-Solver`, EzSolver **không** chặn hay thay
-   thế response của trang. HTML, CSS, và JS thật của chúng ta đều được
-   tải và chạy đúng như trình duyệt của một người dùng bình thường sẽ
-   chạy.
+   Khác với nhánh `Turnstile-Solver`, EzSolver **không** chặn response
+   mạng — HTML thật được tải về ban đầu. **Nhưng xem phần đính chính ở
+   dưới: bước ngay sau đó lại xóa sạch nó.**
 2. **Hook `Element.prototype.attachShadow`** trước khi script của chính
    Turnstile chạy, buộc mọi shadow root mà Cloudflare tạo ra phải ở
    `mode: 'open'` thay vì `'closed'`. Turnstile render iframe của nó
@@ -64,15 +78,33 @@ thêm một bước gọi HTTP cho chỉ một lần test). Trình tự bên tro
    giữa trường hợp "Turnstile chủ động từ chối trình duyệt này" và
    "chỉ đơn giản là hết giờ."
 
+## Đính chính: `solve_on_page()` xóa sạch DOM của trang thật
+
+Đọc kỹ khối code hook ở bước 2, nó bắt đầu bằng
+`window.stop(); document.body.innerHTML = '';` — **trước khi** cài hook
+shadow-DOM và inject div widget của riêng nó. Điều này có nghĩa là
+EzSolver **không** giữ nguyên form, script, hay bất kỳ nội dung DOM nào
+khác của trang thật một khi quá trình giải bắt đầu — nó xóa sạch
+`<body>` ngay sau khi điều hướng, giống hệt cách trang giả ở nhánh
+`Turnstile-Solver` làm, chỉ khác là xóa muộn hơn một bước (sau một lần
+điều hướng thật, thay vì qua route interception).
+
+**Ảnh hưởng thực tế:** `run_test.py` (dùng `solve_on_page()`) vẫn là
+một bài test có ý nghĩa — sitekey thật, domain thật, và bất kỳ script
+nào đã chạy xong trước khi bị xóa đều được thực thi đúng — nhưng nó
+**không** phải là bài test cho form thật hay luồng submit thật, vì form
+đó không còn tồn tại trong DOM vào thời điểm token trả về. Để test đúng
+form và nút bấm thật, hãy dùng `run_ui_test.py` (xem ở trên), vốn không
+bao giờ xóa gì cả.
+
 ## Kết quả thực sự cho chúng ta biết điều gì, với cơ chế này
 
-- **Vì bước 1 tải đúng trang thật của chúng ta mà không sửa đổi gì**,
-  một token thành công ở đây có nghĩa là: *một trình duyệt được điều
-  khiển bằng script, không có con người thật tham gia, chạy đúng JS
-  thật trên trang của chúng ta, đã khiến Turnstile chấp thuận.* Đây là
-  mức độ gần nhất mà một bài test tự động có thể đạt được để mô phỏng
-  "điều gì sẽ xảy ra nếu ngay bây giờ có một bot nhằm trình duyệt vào
-  đúng trang tra cứu thật của chúng ta."
+- **Một token thành công qua `run_test.py` có nghĩa là**: *một trình
+  duyệt được điều khiển bằng script, không có con người thật, đã khiến
+  Turnstile chấp thuận trên đúng domain thật của chúng ta* — nhưng
+  không nói lên gì về việc luồng form/nút bấm thật của chúng ta có qua
+  được mà không bị phát hiện hay không. Đó là mục đích của
+  `run_ui_test.py`.
 - **Kỹ thuật hook shadow-DOM (bước 2) là một điểm đáng lưu ý**, không
   chỉ riêng với tool này: shadow root ở chế độ `closed` không phải là
   một ranh giới bảo mật (security boundary) chống lại chính trình duyệt
@@ -119,3 +151,38 @@ thêm một bước gọi HTTP cho chỉ một lần test). Trình tự bên tro
 - `clientsend.py` hardcode `SERVICE_URL = "http://127.0.0.1:8191/solve"`
   — không liên quan tới chúng ta vì ta không đi qua nó, ghi chú lại ở
   đây chỉ để đầy đủ thông tin.
+
+## `run_ui_test.py` — bài test UI trên form thật
+
+Được viết riêng cho project này, không thuộc EzSolver gốc. Nó chỉ tái
+sử dụng các hàm khởi chạy trình duyệt của EzSolver (`start_browser`,
+`_find_chrome`, `_start_xvfb_if_needed`) và không bao giờ gọi
+`solve_on_page()`, nên DOM của trang thật không bao giờ bị xóa:
+
+1. Load trang thật, không sửa đổi gì.
+2. Polling input ẩn `cf-turnstile-response` thật (do chính script của
+   trang quản lý — chế độ managed/invisible nghĩa là không cần click)
+   cho tới khi nó có giá trị.
+3. Gõ một tax code và lookup code thật vào đúng các ô
+   `input[placeholder="MST bên bán"]` / `input[placeholder="Mã tra cứu hóa đơn"]`,
+   gõ từng ký tự một với độ trễ ngẫu nhiên (`random.uniform(0.05, 0.18)`
+   giây) để tránh kiểu gõ tức thời/máy móc.
+4. Click nút thật được tìm theo text hiển thị, `"Tra cứu"`.
+5. Lấy và in ra nội dung text của trang sau khi submit.
+
+Cấu hình qua `.env`: `TEST_CASES`, một list JSON gồm các object
+`{"tax_code": "...", "lookup_code": "..."}` — mỗi object là một hóa đơn
+thật, đã phát hành, được chính chủ sở hữu site cho phép rõ ràng để dùng
+cho bài test này (xem comment trong `.env.example`). Mỗi phần tử chạy
+đúng 1 lần, theo thứ tự, mỗi lần nhằm vào một hóa đơn thực sự khác
+nhau — khác với việc lặp lại cùng một lượt tra cứu, nên bản thân nó
+không test được rate-limit trên các request giống hệt nhau, nhưng nó
+test được xem site có xử lý nhất quán qua nhiều lượt tra cứu khác nhau
+do bot thực hiện trong cùng một session hay không.
+
+**Chưa được chạy thử end-to-end trong session này** — được viết dựa
+theo API đã công bố của nodriver, nhưng môi trường cloud sandbox này
+không có Chrome thật và không có đường mạng tới mục tiêu, nên các tên
+hàm cụ thể (`page.select`, `page.find`, `element.send_keys`) cần được
+xác nhận lại với phiên bản nodriver bạn đã cài, ở lần chạy đầu tiên trên
+máy bạn.

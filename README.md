@@ -12,6 +12,21 @@ the test result correctly.
 For install/run commands, see [`SETUP.md`](SETUP.md) /
 [`SETUP.vi.md`](SETUP.vi.md).
 
+## Two separate tests in this branch
+
+- **`run_test.py`** — token acquisition via EzSolver's own
+  `solve_on_page()`, then (optionally) a raw HTTP POST of that token to a
+  guessed backend endpoint. See the code walkthrough and the important
+  DOM-wiping caveat below.
+- **`run_ui_test.py`** — a different, more realistic test: loads the real
+  page **unmodified**, waits for its own Turnstile widget to resolve in
+  the background, then types a real tax code + lookup code into the real
+  "MST bên bán" / "Mã tra cứu hóa đơn" form fields with human-like
+  per-character delay, and clicks the real "Tra cứu" button — to answer
+  "does the site detect a bot operating its actual UI," not just "can a
+  token be obtained." It deliberately avoids `solve_on_page()` — see why
+  in the next section.
+
 ## How EzSolver obtains a token — code walkthrough
 
 EzSolver ships two entry points that share the same core logic in
@@ -25,9 +40,9 @@ Our `run_test.py` calls `solver.solve()` directly (no HTTP hop needed for
 a single test). The sequence inside `solve_on_page()`:
 
 1. **Navigate to the real target URL** — `await page.get(siteurl)`. Unlike
-   the `Turnstile-Solver` branch, EzSolver does **not** intercept or
-   replace the page response. Our actual HTML, CSS, and JS all load and
-   run exactly as a normal visitor's browser would run them.
+   the `Turnstile-Solver` branch, EzSolver does **not** intercept the
+   network response — the real HTML initially loads. **But see the
+   correction below: the very next step wipes it.**
 2. **Hook `Element.prototype.attachShadow`** before Turnstile's own script
    runs, forcing every shadow root Cloudflare creates to be `mode: 'open'`
    instead of `'closed'`. Turnstile renders its iframe inside a closed
@@ -56,13 +71,31 @@ a single test). The sequence inside `solve_on_page()`:
    etc.) — useful for distinguishing "Turnstile actively rejected this
    browser" from "it just timed out."
 
+## Correction: `solve_on_page()` wipes the real page's DOM
+
+Step 2's hook code block, read closely, starts with
+`window.stop(); document.body.innerHTML = '';` — **before** installing
+the shadow-DOM hook and injecting its own widget div. This means EzSolver
+does **not** preserve the real page's form, scripts, or any other DOM
+content once solving begins — it erases the body immediately after
+navigation, the same way the `Turnstile-Solver` branch's fake page does,
+just one step later in the sequence (after a real navigation instead of
+via route interception).
+
+**Practical effect:** `run_test.py` (which uses `solve_on_page()`) is
+still a meaningful test — the real page's sitekey, domain, and any
+scripts that already executed before the wipe are exercised — but it is
+**not** a test of the real form or the real submit flow, because that
+form no longer exists in the DOM by the time a token comes back. For a
+test of the real form and button, use `run_ui_test.py` instead (see
+above), which never wipes anything.
+
 ## What a result actually tells us, given this mechanism
 
-- **Because step 1 loads our real page unmodified**, a successful token
-  here means: *a scripted browser, with no human present, running our
-  actual page's real JS, was able to get Turnstile to approve it.* This is
-  as close as an automated test gets to "what would happen if a bot
-  pointed a browser at our real lookup page right now."
+- **A successful token via `run_test.py` means**: *a scripted browser,
+  with no human present, got Turnstile to approve it on our real domain* —
+  but says nothing about whether our real form/button flow would also go
+  through undetected. That's what `run_ui_test.py` is for.
 - **The shadow-DOM hook (step 2) is a meaningful technique to be aware
   of**, independent of this specific tool: `closed` shadow roots are not a
   security boundary against a browser the automation itself controls,
@@ -99,3 +132,37 @@ a single test). The sequence inside `solve_on_page()`:
   it's relevant if this repo is ever reused to run a persistent service.
 - `clientsend.py` hardcodes `SERVICE_URL = "http://127.0.0.1:8191/solve"`
   — irrelevant to us since we bypass it, noted only for completeness.
+
+## `run_ui_test.py` — real-form UI test
+
+Written for this project, not part of upstream EzSolver. It only reuses
+EzSolver's browser-launch helpers (`start_browser`, `_find_chrome`,
+`_start_xvfb_if_needed`) and never calls `solve_on_page()`, so the real
+page's DOM is never wiped:
+
+1. Load the real page unmodified.
+2. Poll the real hidden `cf-turnstile-response` input (the page's own
+   script manages it — managed/invisible mode means no click is needed)
+   until it has a value.
+3. Type a real tax code and lookup code into the real
+   `input[placeholder="MST bên bán"]` / `input[placeholder="Mã tra cứu hóa đơn"]`
+   fields, one character at a time with a randomized delay
+   (`random.uniform(0.05, 0.18)`s) to avoid an instantaneous/robotic fill.
+4. Click the real button found by its visible text, `"Tra cứu"`.
+5. Capture and print the page's body text after submission.
+
+Configured via `.env`: `TEST_CASES`, a JSON list of
+`{"tax_code": "...", "lookup_code": "..."}` objects — each a real,
+already-issued invoice the site owner explicitly authorized for this
+test (see `.env.example`'s comment). One run per entry, in order, each
+against a genuinely different invoice — this is distinct from repeating
+the same lookup, so it doesn't by itself test rate-limiting on identical
+requests, but it does test whether the site behaves consistently across
+multiple distinct bot-driven lookups in one session.
+
+**Not yet executed end-to-end in this session** — written against
+nodriver's documented API, but this sandboxed cloud environment has no
+real Chrome and no network path to the target, so the exact method names
+(`page.select`, `page.find`, `element.send_keys`) should be verified
+against your installed nodriver version the first time you run it
+locally.
