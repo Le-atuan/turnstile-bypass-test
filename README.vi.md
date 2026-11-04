@@ -14,10 +14,14 @@ Lệnh cài đặt/chạy xem tại [`SETUP.md`](SETUP.md) /
 
 ## Hai bài test riêng biệt trong nhánh này
 
+Cả hai script giờ đều lặp qua cùng `TEST_CASES` (4 bộ dữ liệu thật, được
+chủ sở hữu cho phép) và dùng chung mô hình retry/outcome — xem mục "Thử
+lại" ở dưới.
+
 - **`run_test.py`** — lấy token qua `solve_on_page()` của chính EzSolver,
   sau đó (tùy chọn) gửi thẳng một HTTP POST chứa token đó tới endpoint
-  backend đoán được. Xem phần đọc code và lưu ý quan trọng về việc xóa
-  DOM ở dưới.
+  backend đoán được, cho từng bộ trong `TEST_CASES`. Xem phần đọc code
+  và lưu ý quan trọng về việc xóa DOM ở dưới.
 - **`run_ui_test.py`** — một bài test khác, sát thực tế hơn: load đúng
   trang thật **không sửa đổi gì**, chờ widget Turnstile của chính trang
   tự giải xong trong nền, rồi gõ tay tax code + lookup code thật vào
@@ -151,6 +155,26 @@ bao giờ xóa gì cả.
 - `clientsend.py` hardcode `SERVICE_URL = "http://127.0.0.1:8191/solve"`
   — không liên quan tới chúng ta vì ta không đi qua nó, ghi chú lại ở
   đây chỉ để đầy đủ thông tin.
+
+## `run_test.py` — giờ lặp qua toàn bộ TEST_CASES, dùng chung mô hình retry
+
+`run_test.py` không còn chạy 1 lượt tra cứu cố định nữa — nó lặp qua
+`TEST_CASES` (cùng 4 bộ thật mà `run_ui_test.py` dùng), lấy một token
+mới và gửi một HTTP POST mới cho mỗi bộ. Nó dùng chung nguyên tắc cốt
+lõi của `run_ui_test.py` — **chỉ retry khi thật sự lỗi kỹ thuật** —
+nhưng có 4 kết quả thay vì 3, vì response HTTP thô có mã trạng thái rõ
+ràng mà việc đọc text trang của `run_ui_test.py` không có:
+
+| Kết quả | Ý nghĩa | Có retry? |
+|---|---|---|
+| `accepted` | Backend trả về 2xx và không khớp từ khóa nào trong `NOT_FOUND_KEYWORDS`. | Không — kết quả cuối. |
+| `rejected` | Backend trả về không phải 2xx và không khớp `NOT_FOUND_KEYWORDS` — ví dụ token không hợp lệ/bị dùng lại, thiếu field bắt buộc. | Không — kết quả cuối; đây chính xác là tín hiệu "backend có lớp phòng thủ thứ hai thật hay không" mà toàn bộ dự án đang muốn đo. |
+| `not_found` | Response khớp một cụm trong `NOT_FOUND_KEYWORDS` — câu trả lời hợp lệ "không có bản ghi cho bộ này." | Không — kết quả cuối, hiển thị đúng như vậy. |
+| `error` | Chính việc lấy token bị lỗi, hoặc chính request HTTP bị lỗi (connection error, timeout) — không phải một phản hồi từ backend. | **Có**, tối đa `MAX_ATTEMPTS` lần. |
+
+`VERIFY_EXTRA_FIELDS` giờ chỉ chứa các field *ngoài* `tax_code` /
+`lookup_code` — hai field này được gửi trực tiếp từ mỗi phần tử trong
+`TEST_CASES`, nên đừng lặp lại chúng trong `VERIFY_EXTRA_FIELDS`.
 
 ## `run_ui_test.py` — bài test UI trên form thật
 

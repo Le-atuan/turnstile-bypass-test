@@ -14,10 +14,14 @@ For install/run commands, see [`SETUP.md`](SETUP.md) /
 
 ## Two separate tests in this branch
 
+Both scripts now loop over the same `TEST_CASES` (4 real,
+owner-authorized tax_code/lookup_code pairs) and share the same
+retry/outcome model: see "Retries" further below.
+
 - **`run_test.py`** — token acquisition via EzSolver's own
   `solve_on_page()`, then (optionally) a raw HTTP POST of that token to a
-  guessed backend endpoint. See the code walkthrough and the important
-  DOM-wiping caveat below.
+  guessed backend endpoint, for each `TEST_CASES` entry. See the code
+  walkthrough and the important DOM-wiping caveat below.
 - **`run_ui_test.py`** — a different, more realistic test: loads the real
   page **unmodified**, waits for its own Turnstile widget to resolve in
   the background, then types a real tax code + lookup code into the real
@@ -132,6 +136,27 @@ above), which never wipes anything.
   it's relevant if this repo is ever reused to run a persistent service.
 - `clientsend.py` hardcodes `SERVICE_URL = "http://127.0.0.1:8191/solve"`
   — irrelevant to us since we bypass it, noted only for completeness.
+
+## `run_test.py` — now loops over all TEST_CASES, with the same retry model
+
+`run_test.py` no longer runs a single hardcoded lookup — it iterates
+`TEST_CASES` (the same 4 real pairs `run_ui_test.py` uses), solving a
+fresh token and submitting a fresh raw HTTP POST for each one. It shares
+`run_ui_test.py`'s core principle — **only a genuine technical failure is
+retried** — but has four outcomes instead of three, since a raw HTTP
+response carries an explicit status code `run_ui_test.py`'s page-text
+read doesn't:
+
+| Outcome | What it means | Retried? |
+|---|---|---|
+| `accepted` | Backend responded 2xx and no `NOT_FOUND_KEYWORDS` phrase matched. | No — final result. |
+| `rejected` | Backend responded non-2xx and no `NOT_FOUND_KEYWORDS` phrase matched — e.g. an invalid/replayed token, a missing required field. | No — final result; this is exactly the "does the backend have a real second layer" signal the whole project is testing for. |
+| `not_found` | The response matched a `NOT_FOUND_KEYWORDS` phrase — a valid "no record for this pair" answer. | No — final result, reported as-is. |
+| `error` | Token acquisition itself threw, or the HTTP request itself threw (connection error, timeout) — not a response from the backend at all. | **Yes**, up to `MAX_ATTEMPTS` times. |
+
+`VERIFY_EXTRA_FIELDS` now holds only fields *beyond* `tax_code` /
+`lookup_code` — those two are sent directly from each `TEST_CASES` entry,
+so don't duplicate them in `VERIFY_EXTRA_FIELDS`.
 
 ## `run_ui_test.py` — real-form UI test
 
