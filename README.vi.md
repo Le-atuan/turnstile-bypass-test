@@ -166,8 +166,9 @@ gắn nhãn phân loại — `MACHINE_SLEPT`, `BROWSER_DEAD` (crash/hết RAM/sl
 `TURNSTILE`, `NETWORK`, `CHROME_MISSING`, `UNKNOWN` — kèm chuỗi nguyên nhân
 gốc và ngữ cảnh (thời gian, backend, workers, RAM trống). Một **watchdog
 sleep** chạy nền phát hiện máy suspend/treo lâu (dựa trên chênh lệch
-wall-clock vs monotonic) rồi dừng loạt, đánh dấu phần còn lại là `aborted`,
-để máy ngủ không bị nhầm thành site chặn.
+wall-clock vs monotonic); nó **không dừng chạy**, chỉ gắn nhãn
+`MACHINE_SLEPT` cho các lỗi xảy ra sau đó, để máy ngủ không bị nhầm thành
+site chặn.
 
 ## Tích hợp
 

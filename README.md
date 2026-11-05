@@ -168,8 +168,9 @@ with a category — `MACHINE_SLEPT`, `BROWSER_DEAD` (crash/OOM/sleep),
 `TURNSTILE`, `NETWORK`, `CHROME_MISSING`, `UNKNOWN` — plus the root-cause
 chain and context (elapsed, backend, workers, free memory). A background
 **sleep watchdog** detects a system suspend/long freeze (wall-vs-monotonic
-clock drift) and stops the batch, marking the rest `aborted`, so a laptop
-that slept is never mistaken for the site blocking you.
+clock drift); it does not stop the run, it just tags errors that follow as
+`MACHINE_SLEPT` so a laptop that slept is never mistaken for the site
+blocking you.
 
 ## Integration
 

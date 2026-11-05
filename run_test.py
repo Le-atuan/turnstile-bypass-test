@@ -93,7 +93,6 @@ OUTCOME_SERVER_ERROR = "server_error"  # 5xx — transient, retried
 OUTCOME_REJECTED = "rejected"          # other non-2xx, or 2xx with no xml and no clear reason
 OUTCOME_ERROR = "error"                # token acquisition or the HTTP call itself failed
 OUTCOME_SKIPPED = "skipped"            # XML already downloaded in a previous run
-OUTCOME_ABORTED = "aborted"            # not run because the machine slept mid-batch
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "").strip() or os.path.join(LOG_DIR, "xmls")
@@ -219,7 +218,8 @@ def start_sleep_watchdog(interval: float = 5.0, threshold: float = 60.0):
             w, m = time.time(), time.monotonic()
             gap = (w - wall) - (m - mono)  # ~seconds the machine was suspended/frozen
             if gap > threshold:
-                logger.error("WATCHDOG: phát hiện máy sleep/treo ~%.0fs — DỪNG để tránh kết quả rác.", gap)
+                logger.warning("WATCHDOG: phát hiện máy sleep/treo ~%.0fs — lỗi sau đó sẽ được gắn "
+                               "nhãn MACHINE_SLEPT (không dừng chạy).", gap)
                 SUSPENDED.set()
                 return
             wall, mono = w, m
@@ -485,15 +485,11 @@ def run_test_cases(test_cases: list) -> list:
                 results[i - 1] = future.result()
     else:
         for i, tax_code, lookup_code in jobs:
-            if SUSPENDED.is_set():
-                logger.error("Run %d/%d và các ca sau: ABORTED — máy đã sleep giữa chừng.", i, total)
-                results[i - 1] = OUTCOME_ABORTED
-                continue
             results[i - 1] = run_with_retries(f"{i}/{total}", tax_code, lookup_code)
 
     counts = {o: results.count(o) for o in (
         OUTCOME_ACCEPTED, OUTCOME_NOT_FOUND, OUTCOME_RATE_LIMITED, OUTCOME_BLOCKED,
-        OUTCOME_SERVER_ERROR, OUTCOME_REJECTED, OUTCOME_ERROR, OUTCOME_SKIPPED, OUTCOME_ABORTED,
+        OUTCOME_SERVER_ERROR, OUTCOME_REJECTED, OUTCOME_ERROR, OUTCOME_SKIPPED,
     )}
 
     logger.info("SUMMARY (total %d):", total)
@@ -505,11 +501,10 @@ def run_test_cases(test_cases: list) -> list:
     logger.info("  rejected     = %d   (2xx không xml / không rõ)", counts[OUTCOME_REJECTED])
     logger.info("  error        = %d   (lấy token / HTTP hỏng — xem [CATEGORY] ở log)", counts[OUTCOME_ERROR])
     logger.info("  skipped      = %d   (đã tải trước đó)", counts[OUTCOME_SKIPPED])
-    logger.info("  aborted      = %d   (bỏ dở do máy sleep)", counts[OUTCOME_ABORTED])
 
-    if counts[OUTCOME_ABORTED] or SUSPENDED.is_set():
-        logger.info("-> Có ca bị bỏ dở vì MÁY SLEEP (không phải lỗi site). Chạy lại khi máy thức, "
-                    "hoặc dùng: systemd-inhibit --what=idle:sleep xvfb-run -a python run_test.py")
+    if SUSPENDED.is_set():
+        logger.info("-> Watchdog thấy MÁY SLEEP giữa chừng — các lỗi lúc đó đã gắn nhãn MACHINE_SLEPT "
+                    "(không phải lỗi site). Chạy loạt dài nên dùng: systemd-inhibit --what=idle:sleep ...")
     if counts[OUTCOME_RATE_LIMITED] or counts[OUTCOME_BLOCKED]:
         logger.info("-> Có dấu hiệu phòng thủ tầng 2 (rate-limit / chặn bot). Xem body response "
                     "ở log DEBUG (%s) để xác nhận và lấy số liệu cho báo cáo.", LOG_FILE)
