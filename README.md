@@ -158,10 +158,18 @@ a real "not found" response is observed.
 ## Logging
 
 Each run writes `logs/<script>_<timestamp>.log` (full detail +
-tracebacks) alongside concise console output. On a step failure it also
-saves a screenshot + page HTML to `logs/`. XML files downloaded via
+tracebacks) alongside concise console output. XML files downloaded via
 `run_test.py` land in `logs/xmls/` (or `DOWNLOAD_DIR` if set). **`logs/`
 is gitignored** — it can contain real invoice data.
+
+On a failure the log says **why**, not just what: each exception is tagged
+with a category — `MACHINE_SLEPT`, `BROWSER_DEAD` (crash/OOM/sleep),
+`BROWSER_FROZEN` (unresponsive — challenge/sleep/overload), `PAGE_TIMEOUT`,
+`TURNSTILE`, `NETWORK`, `CHROME_MISSING`, `UNKNOWN` — plus the root-cause
+chain and context (elapsed, backend, workers, free memory). A background
+**sleep watchdog** detects a system suspend/long freeze (wall-vs-monotonic
+clock drift) and stops the batch, marking the rest `aborted`, so a laptop
+that slept is never mistaken for the site blocking you.
 
 ## Integration
 

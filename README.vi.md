@@ -156,10 +156,18 @@ gặp phản hồi "không tìm thấy" thật.
 ## Logging
 
 Mỗi lần chạy ghi `logs/<script>_<timestamp>.log` (chi tiết đầy đủ +
-traceback) bên cạnh output console ngắn gọn. Khi một bước lỗi, còn lưu
-thêm screenshot + HTML trang vào `logs/`. File XML tải được qua
+traceback) bên cạnh output console ngắn gọn. File XML tải được qua
 `run_test.py` nằm ở `logs/xmls/`. **`logs/` đã gitignore** — nó có thể
 chứa dữ liệu hóa đơn thật.
+
+Khi lỗi, log nói rõ **do đâu**, không chỉ "lỗi gì": mỗi exception được
+gắn nhãn phân loại — `MACHINE_SLEPT`, `BROWSER_DEAD` (crash/hết RAM/sleep),
+`BROWSER_FROZEN` (treo — challenge/sleep/quá tải), `PAGE_TIMEOUT`,
+`TURNSTILE`, `NETWORK`, `CHROME_MISSING`, `UNKNOWN` — kèm chuỗi nguyên nhân
+gốc và ngữ cảnh (thời gian, backend, workers, RAM trống). Một **watchdog
+sleep** chạy nền phát hiện máy suspend/treo lâu (dựa trên chênh lệch
+wall-clock vs monotonic) rồi dừng loạt, đánh dấu phần còn lại là `aborted`,
+để máy ngủ không bị nhầm thành site chặn.
 
 ## Tích hợp
 

@@ -93,6 +93,7 @@ OUTCOME_SERVER_ERROR = "server_error"  # 5xx — transient, retried
 OUTCOME_REJECTED = "rejected"          # other non-2xx, or 2xx with no xml and no clear reason
 OUTCOME_ERROR = "error"                # token acquisition or the HTTP call itself failed
 OUTCOME_SKIPPED = "skipped"            # XML already downloaded in a previous run
+OUTCOME_ABORTED = "aborted"            # not run because the machine slept mid-batch
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "").strip() or os.path.join(LOG_DIR, "xmls")
@@ -140,6 +141,89 @@ file_handler.setFormatter(
 
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+
+# Set when a system sleep/suspend (or long freeze) is detected, so the run stops.
+SUSPENDED = threading.Event()
+
+
+def _exc_chain_text(exc: BaseException) -> str:
+    """Flatten an exception and its causes into one line (root causes are the useful part)."""
+    parts, e, seen = [], exc, 0
+    while e is not None and seen < 8:
+        parts.append(f"{type(e).__name__}: {e}")
+        e = e.__cause__ or e.__context__
+        seen += 1
+    return " <- ".join(parts)
+
+
+def diagnose_exception(exc: BaseException) -> tuple:
+    """Map an exception to (category, human reason) so the log says WHY, not just what."""
+    text = _exc_chain_text(exc).lower()
+    name = type(exc).__name__
+    if SUSPENDED.is_set():
+        return "MACHINE_SLEPT", "máy vừa sleep/suspend giữa chừng — không phải lỗi site"
+    if any(s in text for s in (
+        "invalid session id", "session deleted", "page crash", "chrome not reachable",
+        "disconnected", "no such window", "target window already closed",
+        "cannot connect to chrome", "connection refused", "max retries exceeded",
+        "failed to establish a new connection",
+    )):
+        return "BROWSER_DEAD", "trình duyệt chết/mất kết nối (crash, hết RAM, hoặc máy đã sleep)"
+    if "read timed out" in text or "readtimeout" in text:
+        return "BROWSER_FROZEN", "trình duyệt treo, không phản hồi (có thể bị challenge, máy sleep, hoặc quá tải)"
+    if name == "TimeoutException" or "timeoutexception" in text:
+        return "PAGE_TIMEOUT", "trang/script quá thời gian (có thể bị challenge hoặc mạng chậm)"
+    if "turnstile" in text or "cloudflare" in text:
+        return "TURNSTILE", "không giải được Turnstile (bị chặn, hoặc sai sitekey/domain)"
+    if any(s in text for s in ("name or service not known", "temporary failure in name resolution",
+                                "connectionerror", "connecttimeout", "ssl", "certificate")):
+        return "NETWORK", "lỗi mạng khi gọi backend (DNS/kết nối/SSL)"
+    if "chrome not found" in text or "filenotfounderror" in text:
+        return "CHROME_MISSING", "không tìm thấy Chrome (set CHROME_PATH trong .env)"
+    return "UNKNOWN", f"lỗi chưa phân loại ({name})"
+
+
+def _mem_hint() -> str:
+    """Best-effort free-memory snapshot, to spot OOM as a cause (Linux /proc, else macOS vm_stat)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable"):
+                    return "MemAvailable=" + line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    try:
+        import subprocess
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=3).stdout
+        free = next((l for l in out.splitlines() if "free" in l.lower()), "")
+        return "vm_stat: " + free.strip() if free else "mem: n/a"
+    except Exception:
+        return "mem: n/a"
+
+
+def _log_exception(run_label: str, stage: str, exc: BaseException, t0: float) -> None:
+    """Uniform, root-cause-first error log for a failed stage."""
+    cat, why = diagnose_exception(exc)
+    logger.error("Run %s: %s FAILED [%s] — %s", run_label, stage, cat, why)
+    logger.error("  nguyên nhân gốc: %s", _exc_chain_text(exc))
+    logger.error("  ngữ cảnh: elapsed=%.1fs | backend=%s | workers=%s | %s",
+                 time.time() - t0, SOLVER_BACKEND, MAX_WORKERS, _mem_hint())
+    logger.debug("Run %s traceback:\n%s", run_label, traceback.format_exc())
+
+
+def start_sleep_watchdog(interval: float = 5.0, threshold: float = 60.0):
+    """Detect a system sleep/suspend (or long freeze) via wall-vs-monotonic drift; set SUSPENDED."""
+    def loop():
+        wall, mono = time.time(), time.monotonic()
+        while not SUSPENDED.wait(interval):
+            w, m = time.time(), time.monotonic()
+            gap = (w - wall) - (m - mono)  # ~seconds the machine was suspended/frozen
+            if gap > threshold:
+                logger.error("WATCHDOG: phát hiện máy sleep/treo ~%.0fs — DỪNG để tránh kết quả rác.", gap)
+                SUSPENDED.set()
+                return
+            wall, mono = w, m
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def require_own_site_ack(total_cases: int):
@@ -291,8 +375,7 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
     try:
         token = step1_solve_token(run_label)
     except Exception as exc:
-        logger.error("Run %s: token acquisition FAILED: %s", run_label, exc)
-        logger.debug("Traceback:\n%s", traceback.format_exc())
+        _log_exception(run_label, "token acquisition (solve Turnstile)", exc, t0)
         return OUTCOME_ERROR
 
     if not VERIFY_ENDPOINT:
@@ -302,8 +385,7 @@ def run_once(run_label: str, tax_code: str, lookup_code: str) -> str:
     try:
         resp = step2_verify_with_backend(token, tax_code, lookup_code)
     except Exception as exc:
-        logger.error("Run %s: backend request FAILED: %s", run_label, exc)
-        logger.debug("Traceback:\n%s", traceback.format_exc())
+        _log_exception(run_label, "backend request (POST verify)", exc, t0)
         return OUTCOME_ERROR
 
     elapsed = round(time.time() - t0, 2)
@@ -367,6 +449,7 @@ def run_test_cases(test_cases: list) -> list:
         return []
 
     require_own_site_ack(len(test_cases))
+    start_sleep_watchdog()
 
     total = len(test_cases)
     jobs = []  # (index, tax_code, lookup_code) for well-formed, not-yet-downloaded cases
@@ -402,11 +485,15 @@ def run_test_cases(test_cases: list) -> list:
                 results[i - 1] = future.result()
     else:
         for i, tax_code, lookup_code in jobs:
+            if SUSPENDED.is_set():
+                logger.error("Run %d/%d và các ca sau: ABORTED — máy đã sleep giữa chừng.", i, total)
+                results[i - 1] = OUTCOME_ABORTED
+                continue
             results[i - 1] = run_with_retries(f"{i}/{total}", tax_code, lookup_code)
 
     counts = {o: results.count(o) for o in (
         OUTCOME_ACCEPTED, OUTCOME_NOT_FOUND, OUTCOME_RATE_LIMITED, OUTCOME_BLOCKED,
-        OUTCOME_SERVER_ERROR, OUTCOME_REJECTED, OUTCOME_ERROR, OUTCOME_SKIPPED,
+        OUTCOME_SERVER_ERROR, OUTCOME_REJECTED, OUTCOME_ERROR, OUTCOME_SKIPPED, OUTCOME_ABORTED,
     )}
 
     logger.info("SUMMARY (total %d):", total)
@@ -416,9 +503,13 @@ def run_test_cases(test_cases: list) -> list:
     logger.info("  blocked      = %d   (bị chặn / challenge bot)", counts[OUTCOME_BLOCKED])
     logger.info("  server_error = %d   (lỗi phía server)", counts[OUTCOME_SERVER_ERROR])
     logger.info("  rejected     = %d   (2xx không xml / không rõ)", counts[OUTCOME_REJECTED])
-    logger.info("  error        = %d   (lấy token / HTTP hỏng)", counts[OUTCOME_ERROR])
+    logger.info("  error        = %d   (lấy token / HTTP hỏng — xem [CATEGORY] ở log)", counts[OUTCOME_ERROR])
     logger.info("  skipped      = %d   (đã tải trước đó)", counts[OUTCOME_SKIPPED])
+    logger.info("  aborted      = %d   (bỏ dở do máy sleep)", counts[OUTCOME_ABORTED])
 
+    if counts[OUTCOME_ABORTED] or SUSPENDED.is_set():
+        logger.info("-> Có ca bị bỏ dở vì MÁY SLEEP (không phải lỗi site). Chạy lại khi máy thức, "
+                    "hoặc dùng: systemd-inhibit --what=idle:sleep xvfb-run -a python run_test.py")
     if counts[OUTCOME_RATE_LIMITED] or counts[OUTCOME_BLOCKED]:
         logger.info("-> Có dấu hiệu phòng thủ tầng 2 (rate-limit / chặn bot). Xem body response "
                     "ở log DEBUG (%s) để xác nhận và lấy số liệu cho báo cáo.", LOG_FILE)
