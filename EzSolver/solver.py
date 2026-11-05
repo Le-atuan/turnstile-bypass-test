@@ -142,47 +142,11 @@ async def solve_on_page(page: uc.Tab, sitekey: str, siteurl: str, timeout: int =
     """Solve Cloudflare Turnstile on a given page/tab."""
     await page.get(siteurl)
 
-    # 1. Keep the real page DOM (cookies/session/referer context intact);
-    #    just intercept attachShadow and append the widget box.
-    await page.evaluate(f"""
-        (() => {{
-            window._tsToken = null;
-            window._tsError = null;
-
-            // Hook attachShadow to pierce Cloudflare's closed shadow DOM
-            const origAttach = Element.prototype.attachShadow;
-            Element.prototype.attachShadow = function(init) {{
-                const root = origAttach.call(this, {{ ...init, mode: 'open' }});
-                window._tsShadowRoot = root;
-                return root;
-            }};
-
-            const wrap = document.createElement('div');
-            wrap.id = '_ts_box';
-            wrap.style = 'position:fixed;top:20px;left:20px;z-index:2147483647;';
-            document.body.appendChild(wrap);
-
-            window._tsLoad = function () {{
-                turnstile.render('#_ts_box', {{
-                    sitekey: '{sitekey}',
-                    callback: function(token) {{ window._tsToken = token; }},
-                    'error-callback': function(code) {{ window._tsError = code; }}
-                }});
-            }};
-
-            const s = document.createElement('script');
-            s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=_tsLoad&render=explicit';
-            s.async = true;
-            document.head.appendChild(s);
-        }})();
-    """)
-
+    # CSP blocks any self-injected widget; read the page's own native one instead.
     async def get_state() -> dict:
         raw = await page.evaluate("""
             JSON.stringify((() => {
-                if (window._tsError) return {error: window._tsError};
-                if (window._tsToken) return {token: window._tsToken};
-                const inp = document.querySelector('#_ts_box [name="cf-turnstile-response"]');
+                const inp = document.querySelector('[name="cf-turnstile-response"]');
                 if (inp && inp.value) return {token: inp.value};
                 return {};
             })())
@@ -193,14 +157,9 @@ async def solve_on_page(page: uc.Tab, sitekey: str, siteurl: str, timeout: int =
         raw = await page.evaluate("""
             JSON.stringify((() => {
                 let f = null;
-                if (window._tsShadowRoot) {
-                    f = window._tsShadowRoot.querySelector('iframe');
-                }
-                if (!f) {
-                    for (const el of document.querySelectorAll('iframe')) {
-                        const src = el.src || el.getAttribute('src') || '';
-                        if (src.includes('challenges.cloudflare.com')) { f = el; break; }
-                    }
+                for (const el of document.querySelectorAll('iframe')) {
+                    const src = el.src || el.getAttribute('src') || '';
+                    if (src.includes('challenges.cloudflare.com')) { f = el; break; }
                 }
                 if (f) {
                     const r = f.getBoundingClientRect();

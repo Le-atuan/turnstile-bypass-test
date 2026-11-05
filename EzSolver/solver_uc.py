@@ -35,33 +35,12 @@ def _installed_chrome_major() -> Optional[int]:
     return None
 
 
-def _inject_widget(driver, sitekey: str):
-    driver.execute_script(f"""
-        window._tsToken = null;
-        window._tsError = null;
-        const wrap = document.createElement('div');
-        wrap.id = '_ts_box';
-        wrap.style = 'position:fixed;top:20px;left:20px;z-index:2147483647;';
-        document.body.appendChild(wrap);
-        window._tsLoad = function () {{
-            turnstile.render('#_ts_box', {{
-                sitekey: '{sitekey}',
-                callback: function(token) {{ window._tsToken = token; }},
-                'error-callback': function(code) {{ window._tsError = code; }}
-            }});
-        }};
-        const s = document.createElement('script');
-        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=_tsLoad&render=explicit';
-        s.async = true;
-        document.head.appendChild(s);
-    """)
-
-
 def _get_state(driver) -> dict:
+    # CSP blocks any self-injected widget; read the page's own native one instead.
     raw = driver.execute_script("""
         return JSON.stringify((() => {
-            if (window._tsError) return {error: window._tsError};
-            if (window._tsToken) return {token: window._tsToken};
+            const inp = document.querySelector('[name="cf-turnstile-response"]');
+            if (inp && inp.value) return {token: inp.value};
             return {};
         })());
     """)
@@ -90,9 +69,9 @@ def solve(sitekey: str, siteurl: str, timeout: int = 60) -> str:
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     driver = uc.Chrome(options=options, headless=False, version_main=_installed_chrome_major())
+    time.sleep(1.5)  # let the window attach before the first command (uc race on rapid relaunch)
     try:
         driver.get(siteurl)
-        _inject_widget(driver, sitekey)
 
         start = time.time()
         rect = None

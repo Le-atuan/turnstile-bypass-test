@@ -5,14 +5,25 @@
 Tích hợp [`ismoiloffS/EzSolver`](https://github.com/ismoiloffS/EzSolver)
 (MIT) để test trang tra cứu `tracuu.einvoice365.com` của chúng ta. Xem
 [nhánh `main`](../../tree/main) để có tổng quan. Hướng dẫn cài/chạy:
-[`SETUP.md`](SETUP.md) / [`SETUP.vi.md`](SETUP.vi.md).
+[`SETUP.md`](SETUP.md) / [`SETUP.vi.md`](SETUP.vi.md). Hướng dẫn tích hợp
+vào project của bạn: [`INTEGRATION.md`](INTEGRATION.md) /
+[`INTEGRATION.vi.md`](INTEGRATION.vi.md).
 
 ## Backend giải Turnstile
 
-Chỉ `undetected-chromedriver` (`SOLVER_BACKEND=uc`,
-`EzSolver/solver_uc.py`) vượt được Turnstile của site này — đây là
-default cho 2 script bên dưới. `nodriver` và `playwright-stealth` đã
-thử và bị chặn.
+Cả `undetected-chromedriver` (`SOLVER_BACKEND=uc`, `EzSolver/solver_uc.py`)
+và `nodriver` (`SOLVER_BACKEND=nodriver`, `EzSolver/solver.py`) đều vượt
+được Turnstile của site này. Site có CSP (`script-src` kèm `nonce` +
+`strict-dynamic`) chặn widget Turnstile tự inject — cả 2 solver đọc token
+trực tiếp từ widget `.cf-turnstile` có sẵn trên trang, tự auto-verify sau
+vài giây, không cần click. `playwright-stealth` đã thử và bị chặn.
+
+**Backend khuyến nghị: `nodriver`.** `uc` có lỗi crash ngẫu nhiên
+`NoSuchWindowException` (browser chết giữa lúc chạy) với các bản Chrome
+gần đây (gặp trên 156.0.8078.80) — đây là vấn đề tương thích
+driver/Chrome, không liên quan đến phòng thủ của site, và xóa cache
+`undetected_chromedriver` cũng không hết hẳn. `nodriver` chạy ổn định
+xuyên suốt các lần test.
 
 ## Các script
 
@@ -20,10 +31,13 @@ thử và bị chặn.
 |---|---|---|
 | `get_tracuu_einvoice365.py` | **một** object result_json | Lấy **một** hóa đơn, trả về `{"file_pdf": None, "file_xml": <đường dẫn>}`. Đây là điểm vào để tích hợp — import `get_file()` vào project của bạn, hoặc chạy trực tiếp để lấy 1 file. |
 | `run_test.py` | một **mảng** object | Harness test: giải Turnstile qua backend `uc`, gửi token tới `POST /api/search` (endpoint/payload reverse-engineer bằng `capture_request.py`) cho từng bộ, lưu từng XML. Hỗ trợ `MAX_WORKERS>1` để chạy song song, mỗi bộ 1 browser — trả lời: "Backend có nhận token mà không cần phiên trình duyệt thật, và có rate-limit không?" |
+| `run_ui_test.py` | một **mảng** object (`TEST_CASES` trong `.env`) | Test bot-detection trên UI qua `nodriver` (`EzSolver/solver.py`): lái trang thật — chờ Turnstile, điền form thật, click "Tra cứu", đọc kết quả — thay vì replay token qua raw HTTP. Kiểm tra site có phát hiện bot điều khiển UI không (không chỉ API). Chạy không cần xác nhận. |
 | `capture_request.py` | — | Chạy 1 lần: lái UI thật bằng `uc`, hook `fetch`/`XMLHttpRequest`, dump đúng request trang gửi vào `captured_request.json`. Dùng để tìm ra endpoint/payload. |
 
 `run_test.py` lặp qua các cặp trong `test_cases.json` (hoặc `--cases <path>`);
-`get_tracuu_einvoice365.py` xử lý đúng một cặp.
+`get_tracuu_einvoice365.py` xử lý đúng một cặp. `run_ui_test.py` lặp qua
+`TEST_CASES` trong `.env` — cùng shape
+`{"info": {"tax_code": "...", "lookup_code": "..."}}`.
 
 ## Các lệnh chạy
 
@@ -75,8 +89,20 @@ python run_test.py --cases /đường/dẫn/tới/file_của_bạn.json
 MAX_WORKERS=4 python run_test.py
 ```
 
-Chạy đồng thời tối đa 4 bộ hồ sơ, mỗi bộ 1 browser riêng, để xem backend
-có chặn/đánh dấu các request đồng thời giống nhau không.
+Chạy đồng thời tối đa 4 bộ hồ sơ, mỗi bộ 1 browser riêng, để kiểm tra
+backend có chặn/đánh dấu các request đồng thời giống nhau từ 1 máy không
+(tại thời điểm test này, chưa chặn).
+
+### Test bot-detection trên UI (lái trang thật, không phải raw HTTP)
+
+```bash
+python run_ui_test.py       # backend nodriver — khuyến nghị, ổn định
+```
+
+Điền MST/mã tra cứu và click nút "Tra cứu" thật như người dùng thay vì
+replay token qua raw HTTP — kiểm tra site có phát hiện tương tác UI từ
+bot không. Bộ test lấy từ `TEST_CASES` trong `.env`. Chạy không cần xác
+nhận.
 
 ### Chạy 1 lần: capture đúng request mà trang thật gửi
 
@@ -110,12 +136,8 @@ flowchart TD
     J -->|hết| EF["error — kết quả cuối"]
 ```
 
-Để lấy một hóa đơn, dùng `get_tracuu_einvoice365.py` — cùng luồng
-giải+verify+lưu, vào 1 object ra 1 file (xem **Tích hợp**).
-
-Các bộ test khác nhau chạy song song khi `MAX_WORKERS>1` (mỗi bộ 1 browser
-riêng, qua `ThreadPoolExecutor`); chỉ `error` mới retry — `skipped`,
-`not_found`, `rejected`, `accepted` luôn là kết quả cuối.
+Để lấy một hóa đơn, dùng `get_tracuu_einvoice365.py` (xem
+[`INTEGRATION.vi.md`](INTEGRATION.vi.md)).
 
 ## Kết quả & thử lại
 
@@ -141,17 +163,8 @@ hóa đơn hợp lệ (tra tay vẫn thấy) lại trả về một trong hai lo
 loạt request tự động, đó là site đang chặn bot. Status + headers + trích
 body của mọi lần chạy không-accepted được ghi ở mức DEBUG trong file `logs/`
 để xác nhận đúng loại. Chỉnh nhận diện qua `RATE_LIMIT_STATUSES` và
-`CHALLENGE_MARKERS` trong `.env`.
-
-## Chạy song song nhiều bộ
-
-`run_test.py` với `MAX_WORKERS>1` trong `.env` chạy đồng thời nhiều bộ
-hồ sơ, mỗi bộ 1 browser riêng — dùng để kiểm tra backend có chặn/đánh
-dấu các request đồng thời giống nhau từ 1 máy không (tại thời điểm test
-này, chưa chặn).
-
-`NOT_FOUND_KEYWORDS` là danh sách **đoán, chưa xác nhận** — chỉnh lại khi
-gặp phản hồi "không tìm thấy" thật.
+`CHALLENGE_MARKERS` trong `.env`. `NOT_FOUND_KEYWORDS` là danh sách
+**đoán, chưa xác nhận** — chỉnh lại khi gặp phản hồi "không tìm thấy" thật.
 
 ## Logging
 
@@ -172,128 +185,9 @@ site chặn.
 
 ## Tích hợp
 
-Cách dùng đúng là thay thế `GetFolderTraCuuEinvoice365.get_file`: clone repo
-này thành **một folder riêng** bên trong project chính, rồi gọi
-`get_file(result_json)` với một object.
-
-### Bố cục sau khi clone
-
-```
-project-cua-ban/
-├── app.py                      # code của bạn
-├── services/
-│   └── invoice_service.py      # nơi gọi get_file
-└── turnstile-bypass-test/      # REPO NÀY, clone thành 1 folder
-    ├── get_tracuu_einvoice365.py
-    ├── EzSolver/
-    ├── requirements.txt
-    └── .env                    # tạo từ .env.example
-```
-
-### Các bước
-
-**1. Clone vào folder con**
-
-```bash
-cd project-cua-ban
-git clone -b ezsolver-v2 https://github.com/Le-atuan/turnstile-bypass-test.git
-```
-
-Thêm `turnstile-bypass-test/` vào `.gitignore` của project cha, hoặc dùng
-git submodule, để tránh lồng repo trong repo.
-
-**2. Cài dependencies vào ĐÚNG môi trường Python của project**
-
-```bash
-pip install -r turnstile-bypass-test/requirements.txt
-```
-
-Cài vào cùng venv/interpreter mà app đang chạy. Máy phải có Google Chrome
-thật (xem mục Yêu cầu).
-
-**3. Tạo `.env` bên trong folder đã clone**
-
-```bash
-cp turnstile-bypass-test/.env.example turnstile-bypass-test/.env
-```
-
-Không cần sửa gì nếu target không đổi. File `.env` này **vẫn được tìm thấy**
-kể cả khi app chạy từ thư mục cha — `python-dotenv` dò theo vị trí file
-module, không theo thư mục làm việc hiện tại.
-
-**4. Import và gọi**
-
-Tên folder `turnstile-bypass-test` có dấu gạch ngang nên không import thẳng
-được — phải thêm vào `sys.path` trước:
-
-```python
-# services/invoice_service.py
-import os, sys
-
-VENDOR = os.path.join(os.path.dirname(__file__), "..", "turnstile-bypass-test")
-sys.path.insert(0, os.path.abspath(VENDOR))
-
-from get_tracuu_einvoice365 import get_file
-
-def lay_hoa_don(result_json):
-    # result_json là object API bên bạn trả về
-    result = get_file(result_json)             # tùy chọn: get_file(result_json, download_dir="/thư/mục/của/bạn")
-    # -> {"file_pdf": None, "file_xml": "/abs/path/invoice_...xml" | None}
-    return result
-```
-
-`EzSolver/` được thêm vào path tự động (theo vị trí file module), nên thư
-mục làm việc không quan trọng.
-
-### `get_file()` hoạt động thế nào
-
-```mermaid
-flowchart TD
-    A["get_file(result_json)"] --> B{"Object hợp lệ<br/>+ env đủ?"}
-    B -->|không| X["file_xml = None, trả về"]
-    B -->|hợp lệ| C["Mở Chrome qua backend uc,<br/>giải Turnstile, lấy token"]
-    C -->|lỗi kỹ thuật| E1{"Còn lượt thử<br/>trong MAX_ATTEMPTS?"}
-    C -->|có token| D["POST mst + sec + token<br/>tới VERIFY_ENDPOINT"]
-    D -->|lỗi kỹ thuật| E1
-    D --> G{"HTTP 2xx?"}
-    G -->|không| R["file_xml = None, trả về"]
-    G -->|có| H{"Response JSON có field<br/>xml khác rỗng?"}
-    H -->|không| R
-    H -->|có| I["Lưu XML vào logs/xmls/,<br/>file_xml = đường dẫn"]
-    I --> ACC["trả về file_pdf=None, file_xml=path"]
-    E1 -->|còn| C
-    E1 -->|hết| EF["file_xml = None, trả về"]
-```
-
-Khác `run_test.py`: không kiểm `downloaded.json` (luôn lấy mới), không
-phân nhánh `not_found` riêng (không có XML thì trả `None`), và retry bao
-trọn cả bước giải token lẫn gửi HTTP.
-
-### Hợp đồng (contract)
-
-- **Vào** — một dict `result_json` dạng `{"info": {"tax_code", "lookup_code"}}`
-  (một object, không phải mảng). Mảng là việc của `run_test.py`. Nếu API
-  của bạn trả cấu trúc khác, chỉnh lại hàm `extract_pair()`.
-- **Ra** — `{"file_pdf": None, "file_xml": <đường dẫn tuyệt đối | None>}`.
-  `file_pdf` luôn `None` (luồng này chỉ lấy XML).
-- **Retry** — chỉ khi **lỗi kỹ thuật** (lấy token/HTTP hỏng), tối đa
-  `MAX_ATTEMPTS`. Câu trả lời "không có file" rõ ràng là kết quả cuối.
-- **Cấu hình** — đọc từ `.env`/môi trường: `TARGET_SITEURL`,
-  `TARGET_SITEKEY`, `VERIFY_ENDPOINT`, `VERIFY_TOKEN_FIELD`,
-  `SOLVER_BACKEND` (`uc`), `MAX_ATTEMPTS`, `DOWNLOAD_DIR`.
-
-### Những điều dễ dính bẫy
-
-- **Tên folder có dấu `-`** → dùng `sys.path.insert(...)` rồi
-  `import get_tracuu_einvoice365`; không `import turnstile-bypass-test` được.
-- **File XML tải xuống nằm trong folder đã clone**
-  (`turnstile-bypass-test/logs/xmls/`) vì đường dẫn tính theo vị trí module.
-  Đổi bằng `get_file(obj, download_dir="/chỗ/khác")` hoặc `DOWNLOAD_DIR` trong `.env`.
-- **Cấu hình đọc lúc import.** Muốn set bằng `os.environ` thay vì `.env` thì
-  phải set **trước khi** import module. Dùng `.env` thì không vướng.
-- **Không side effect khi import** — module không thêm log handler và không
-  mở browser lúc import; chỉ mở browser khi gọi `get_file()`. Cấu hình logger
-  `get_tracuu_einvoice365` nếu muốn thấy log của nó.
+Xem [`INTEGRATION.md`](INTEGRATION.md) / [`INTEGRATION.vi.md`](INTEGRATION.vi.md)
+để dùng cái này thay cho `GetFolderTraCuuEinvoice365.get_file` trong project
+của bạn (bố cục, cách import, contract, các bẫy dễ gặp).
 
 ## Yêu cầu
 

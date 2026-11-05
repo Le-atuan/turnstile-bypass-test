@@ -43,6 +43,7 @@ VERIFY_ENDPOINT = os.environ.get("VERIFY_ENDPOINT", "").strip()
 VERIFY_METHOD = os.environ.get("VERIFY_METHOD", "POST").strip().upper()
 VERIFY_TOKEN_FIELD = os.environ.get("VERIFY_TOKEN_FIELD", "cf-turnstile-response").strip()
 VERIFY_EXTRA_FIELDS = json.loads(os.environ.get("VERIFY_EXTRA_FIELDS", "{}") or "{}")
+VERIFY_TIMEOUT = int(os.environ.get("VERIFY_TIMEOUT", "30"))  # backend response wait (xml lookup can be slow)
 
 # JSON list of result_json-shaped {"info": {"tax_code", "lookup_code"}} objects, not read from .env.
 DEFAULT_TEST_CASES_FILE = "test_cases.json"
@@ -260,9 +261,9 @@ def step2_verify_with_backend(token: str, tax_code: str, lookup_code: str):
     }
 
     if VERIFY_METHOD == "GET":
-        resp = requests.get(VERIFY_ENDPOINT, params=payload, timeout=30)
+        resp = requests.get(VERIFY_ENDPOINT, params=payload, timeout=VERIFY_TIMEOUT)
     else:
-        resp = requests.post(VERIFY_ENDPOINT, json=payload, timeout=30)
+        resp = requests.post(VERIFY_ENDPOINT, json=payload, timeout=VERIFY_TIMEOUT)
 
     logger.debug("      -> HTTP %s: %s", resp.status_code, resp.text[:300].replace("\n", " "))
     return resp
@@ -348,23 +349,26 @@ def classify_response(resp) -> tuple:
                else f"marker '{marker}'" if marker else f"HTTP {status} HTML body")
         return OUTCOME_BLOCKED, f"HTTP {status}, {why}"
 
-    # 3. Server error — transient, retried.
+    # 3. Genuine "no record" message — the site may send this on any status
+    # (e.g. HTTP 500 instead of 200/404), so check it before treating 5xx as transient.
+    if any(kw.lower() in lowered for kw in NOT_FOUND_KEYWORDS):
+        return OUTCOME_NOT_FOUND, f"HTTP {status}, matched a not-found phrase"
+
+    # 4. Server error — transient, retried.
     if 500 <= status < 600:
         return OUTCOME_SERVER_ERROR, f"HTTP {status}"
 
-    # 4. Other non-2xx.
+    # 5. Other non-2xx.
     if not (200 <= status < 300):
         return OUTCOME_REJECTED, f"HTTP {status}"
 
-    # 5. 2xx — inspect the JSON envelope.
+    # 6. 2xx — inspect the JSON envelope.
     try:
         data = resp.json()
     except ValueError:
         return OUTCOME_REJECTED, f"HTTP {status}, non-JSON body"
     if isinstance(data, dict) and data.get("xml"):
         return OUTCOME_ACCEPTED, None
-    if any(kw.lower() in lowered for kw in NOT_FOUND_KEYWORDS):
-        return OUTCOME_NOT_FOUND, f"HTTP {status}, no xml, matched a not-found phrase"
     return OUTCOME_REJECTED, f"HTTP {status}, 2xx but no xml and no not-found marker"
 
 
@@ -422,6 +426,7 @@ def run_with_retries(run_label: str, tax_code: str, lookup_code: str) -> str:
                 "Run %s: transient error (%s) — retrying (attempt %d/%d)...",
                 run_label, outcome, attempt + 1, MAX_ATTEMPTS,
             )
+            time.sleep(3)  # let the previous Chrome/chromedriver fully release before relaunching
         else:
             logger.error(
                 "Run %s: all %d attempt(s) failed (%s). See the log file for details.",
@@ -484,7 +489,9 @@ def run_test_cases(test_cases: list) -> list:
                 i = futures[future]
                 results[i - 1] = future.result()
     else:
-        for i, tax_code, lookup_code in jobs:
+        for n, (i, tax_code, lookup_code) in enumerate(jobs):
+            if n > 0:
+                time.sleep(3)  # let the previous Chrome/chromedriver fully release before relaunching
             results[i - 1] = run_with_retries(f"{i}/{total}", tax_code, lookup_code)
 
     counts = {o: results.count(o) for o in (
